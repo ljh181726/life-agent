@@ -402,7 +402,6 @@ def process_telegram_commands(today_dt):
                     properties = {
                         "名稱": {"title": [{"text": {"content": name}}]},
                         "類型": {"select": {"name": "作業"}},
-                        "開始日期": {"date": {"start": today_str}},
                         "截止或考試日期": {"date": {"start": due_date}},
                         "相關科目": {"rich_text": [{"text": {"content": subject}}]},
                         "總頁數/題數": {"number": 1},
@@ -726,7 +725,6 @@ def run_mode_a(today_dt):
                 update_properties = {
                     "名稱": {"title": [{"text": {"content": get_title(row, "名稱") or res_data.get("name", "未命名事項")}}]},
                     "類型": {"select": {"name": get_select(row, "類型") or res_data.get("type", "作業")}},
-                    "開始日期": {"date": {"start": get_date(row, "開始日期") or today_str}},
                     "截止或考試日期": {"date": {"start": get_date(row, "截止或考試日期") or res_data.get("due_date", today_str)}},
                     "相關科目": {"rich_text": [{"text": {"content": get_rich_text(row, "相關科目") or res_data.get("subject", "無")}}]},
                     "總頁數/題數": {"number": get_number(row, "總頁數/題數") if get_number(row, "總頁數/題數") is not None else 1},

@@ -66,7 +66,6 @@ def main():
             "properties": {
                 "名稱": {"title": {}},
                 "類型": {"select": {"options": [{"name": "作業"}, {"name": "小考"}, {"name": "段考"}, {"name": "回條"}, {"name": "報名表"}]}},
-                "開始日期": {"date": {}},
                 "截止或考試日期": {"date": {}},
                 "相關科目": {"rich_text": {}},
                 "總頁數/題數": {"number": {"format": "number"}},
