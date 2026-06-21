@@ -216,6 +216,7 @@ main.delete_page = mock_delete_page
 main.analyze_receipt = mock_analyze_receipt
 main.analyze_todo_photo = mock_analyze_todo_photo
 main.send_telegram_message = mock_send_telegram_message
+main.get_bot_user_id = lambda: "mock_bot_user_id"
 
 # ==================== 執行測試 ====================
 

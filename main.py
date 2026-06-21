@@ -155,6 +155,18 @@ def get_first_file_url(page, property_name):
         return first_file.get("external", {}).get("url")
     return None
 
+def get_bot_user_id():
+    if not NOTION_TOKEN:
+        return None
+    try:
+        url = "https://api.notion.com/v1/users/me"
+        res = requests.get(url, headers=HEADERS)
+        if res.status_code == 200:
+            return res.json().get("id")
+    except Exception as e:
+        print(f"取得 Bot User ID 失敗: {e}")
+    return None
+
 # ==================== Telegram Bot ====================
 
 def send_telegram_message(message):
@@ -203,7 +215,7 @@ def analyze_receipt(image_url):
       "category": "飲食"
     }
     """
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-3.1-flash-lite')
     response = model.generate_content([img, prompt], generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text.strip())
 
@@ -228,7 +240,7 @@ def analyze_todo_photo(image_url, today_str):
       "subject": "數學"
     }
     """
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-3.1-flash-lite')
     response = model.generate_content([img, prompt], generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text.strip())
 
@@ -459,7 +471,7 @@ def run_mode_a(today_dt):
     if total_spend > 0:
         try:
             spend_details = ", ".join([f"{get_title(x, '項目名稱')}({get_number(x, '金額')}元)" for x in today_ledgers])
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-3.1-flash-lite')
             joke_prompt = f"今天總共花了 {total_spend} 元，消費項目包括：{spend_details}。請根據這些消費內容寫一句幽默、口語化且帶有警示效果的繁體中文理財提醒，字數在 50 字以內。"
             joke_res = model.generate_content(joke_prompt)
             finance_joke = joke_res.text.strip()
@@ -574,6 +586,54 @@ def run_mode_b(today_dt):
         available_blocks.append((19 * 60, 21 * 60 + 30)) # 19:00 - 21:30
 
     fixed_events = []
+    bot_user_id = get_bot_user_id()
+    print(f"當前 Bot User ID: {bot_user_id}")
+
+    # 讀取今天行事曆中的現有事件，保留使用者手動建立的，並作為固定行程（Busy Blocks）避開
+    today_calendar_filter = {
+        "filter": {
+            "and": [
+                {"property": "日期", "date": {"equals": today_str}},
+                {"property": "行程名稱", "title": {"does_not_contain": "攜帶備忘"}}
+            ]
+        }
+    }
+    existing_events = []
+    if WEEKLY_CALENDAR_DB_ID:
+        try:
+            existing_events = query_database_all(WEEKLY_CALENDAR_DB_ID, today_calendar_filter)
+        except Exception as e:
+            print(f"讀取今日行事曆失敗: {e}")
+
+    # 分類：區分自動建立的（待清除）與使用者建立的（保留並視為固定行程）
+    bot_event_ids_to_delete = []
+    for row in existing_events:
+        created_by_id = row.get("created_by", {}).get("id")
+        if bot_user_id and created_by_id == bot_user_id:
+            # 這是機器人自動生成的，需要刪除重建
+            bot_event_ids_to_delete.append(row["id"])
+        else:
+            # 這是使用者手動加入的，保留，並加到 fixed_events
+            start_time_str = get_rich_text(row, "開始時間")
+            end_time_str = get_rich_text(row, "結束時間")
+            name = get_title(row, "行程名稱")
+            if start_time_str and end_time_str:
+                try:
+                    start_time_str = start_time_str.strip()
+                    end_time_str = end_time_str.strip()
+                    if ":" in start_time_str and ":" in end_time_str:
+                        sh, sm = map(int, start_time_str.split(":"))
+                        eh, em = map(int, end_time_str.split(":"))
+                        fixed_events.append({
+                            "name": name,
+                            "start": sh * 60 + sm,
+                            "end": eh * 60 + em,
+                            "type": get_select(row, "行程類型") or "上課",
+                            "is_user_event": True
+                        })
+                        print(f"偵測到使用者手動排程，已視為固定行程: {start_time_str}-{end_time_str} {name}")
+                except Exception as e:
+                    print(f"解析手動行程時間失敗 [{name}]: {e}")
     for s in today_fixed_schedules:
         time_range = get_rich_text(s, "時間段")
         name = get_title(s, "科目名稱")
@@ -832,20 +892,16 @@ def run_mode_b(today_dt):
     planned_events.sort(key=lambda x: x["start"])
 
     # 5. 批次寫回 Notion
-    today_calendar_filter = {
-        "filter": {
-            "and": [
-                {"property": "日期", "date": {"equals": today_str}},
-                {"property": "行程名稱", "title": {"does_not_contain": "攜帶備忘"}}
-            ]
-        }
-    }
-    existing_events = query_database_all(WEEKLY_CALENDAR_DB_ID, today_calendar_filter)
-    for row in existing_events:
-        delete_page(row["id"])
-    print(f"已清除今日已存在行程共 {len(existing_events)} 筆。")
+    # 僅刪除屬於機器人自動生成的現有事件
+    for page_id in bot_event_ids_to_delete:
+        delete_page(page_id)
+    print(f"已清除今日自動生成行程共 {len(bot_event_ids_to_delete)} 筆。")
 
     for event in planned_events:
+        if event.get("is_user_event"):
+            # 使用者手動建立的行程原本就存在於 Notion 中，不重複寫入！
+            continue
+            
         sh, sm = divmod(event["start"], 60)
         eh, em = divmod(event["end"], 60)
         start_str = f"{sh:02d}:{sm:02d}"
