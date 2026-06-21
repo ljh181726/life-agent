@@ -190,9 +190,295 @@ def send_telegram_message(message):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message
     }
-    res = requests.post(url, json=payload)
+    try:
+        res = requests.post(url, json=payload)
+        res.raise_for_status()
+        print("Telegram 訊息發送成功。")
+    except Exception as e:
+        print(f"Telegram 訊息發送失敗: {e}")
+
+def get_telegram_file_url(file_id):
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
+    res = requests.get(url)
     res.raise_for_status()
-    print("Telegram 訊息發送成功。")
+    file_path = res.json().get("result", {}).get("file_path")
+    if file_path:
+        return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+    return None
+
+def parse_hw_command(text):
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return None
+    
+    due_date = "#"
+    subject = "#"
+    
+    if len(parts) >= 4:
+        last_part = parts[-1]
+        if last_part == "#" or (len(last_part) == 10 and last_part[4] == '-' and last_part[7] == '-'):
+            due_date = last_part
+            subject = parts[-2]
+            name = " ".join(parts[1:-2])
+        else:
+            subject = parts[-1]
+            name = " ".join(parts[1:-1])
+    elif len(parts) == 3:
+        subject = parts[-1]
+        name = parts[1]
+    else:
+        name = parts[1]
+        
+    return {"name": name, "subject": subject, "due_date": due_date}
+
+def parse_finish_command(text):
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return None
+    
+    actual_time = "#"
+    if len(parts) >= 3:
+        last_part = parts[-1]
+        if last_part.isdigit() or last_part == "#":
+            actual_time = last_part
+            name = " ".join(parts[1:-1])
+        else:
+            name = " ".join(parts[1:])
+    else:
+        name = parts[1]
+        
+    return {"name": name, "actual_time": actual_time}
+
+def parse_act_command(text):
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return None
+    
+    date_val = "#"
+    if len(parts) >= 3:
+        last_part = parts[-1]
+        if last_part == "#" or (len(last_part) == 10 and last_part[4] == '-' and last_part[7] == '-'):
+            date_val = last_part
+            name = " ".join(parts[1:-1])
+        else:
+            name = " ".join(parts[1:])
+    else:
+        name = parts[1]
+        
+    return {"name": name, "date": date_val}
+
+def process_telegram_commands(today_dt):
+    if not TELEGRAM_BOT_TOKEN:
+        print("未設定 TELEGRAM_BOT_TOKEN，跳過指令處理。")
+        return
+        
+    print("正在檢查 Telegram 新指令...")
+    today_str = today_dt.strftime("%Y-%m-%d")
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    try:
+        res = requests.get(url)
+        res.raise_for_status()
+        updates = res.json().get("result", [])
+    except Exception as e:
+        print(f"取得 Telegram 更新失敗: {e}")
+        return
+
+    if not updates:
+        print("沒有新的 Telegram 指令。")
+        return
+
+    max_update_id = 0
+    for update in updates:
+        update_id = update["update_id"]
+        if update_id > max_update_id:
+            max_update_id = update_id
+            
+        message = update.get("message")
+        if not message:
+            continue
+            
+        text = message.get("text") or message.get("caption") or ""
+        text = text.strip()
+        if not text:
+            continue
+            
+        cmd_type = None
+        if text.startswith("@hw"):
+            cmd_type = "hw"
+        elif text.startswith("@finish"):
+            cmd_type = "finish"
+        elif text.startswith("@act"):
+            cmd_type = "act"
+            
+        if not cmd_type:
+            continue
+            
+        print(f"收到指令: {text}")
+        
+        file_id = None
+        file_url = None
+        file_bytes = None
+        
+        if "photo" in message:
+            file_id = message["photo"][-1]["file_id"]
+        elif "document" in message:
+            file_id = message["document"]["file_id"]
+            
+        if file_id:
+            try:
+                file_url = get_telegram_file_url(file_id)
+                if file_url:
+                    resp = requests.get(file_url)
+                    resp.raise_for_status()
+                    file_bytes = resp.content
+            except Exception as e:
+                print(f"下載 Telegram 附件失敗: {e}")
+
+        try:
+            if cmd_type == "hw":
+                cmd_data = parse_hw_command(text)
+                if cmd_data:
+                    name = cmd_data["name"]
+                    subject = cmd_data["subject"]
+                    due_date = cmd_data["due_date"]
+                    
+                    if (name == "#" or subject == "#" or due_date == "#") and file_bytes:
+                        try:
+                            res_json = analyze_todo_photo_bytes(file_bytes, today_str)
+                            if name == "#": name = res_json.get("name", "未命名事項")
+                            if subject == "#": subject = res_json.get("subject", "無")
+                            if due_date == "#": due_date = res_json.get("due_date", today_str)
+                        except Exception as gem_err:
+                            print(f"Gemini 輔助提取待辦失敗: {gem_err}")
+                            if name == "#": name = "未命名事項"
+                            if subject == "#": subject = "無"
+                            if due_date == "#": due_date = today_str
+                    else:
+                        if name == "#": name = "未命名事項"
+                        if subject == "#": subject = "無"
+                        if due_date == "#": due_date = today_str
+                        
+                    properties = {
+                        "名稱": {"title": [{"text": {"content": name}}]},
+                        "類型": {"select": {"name": "作業"}},
+                        "開始日期": {"date": {"start": today_str}},
+                        "截止或考試日期": {"date": {"start": due_date}},
+                        "相關科目": {"rich_text": [{"text": {"content": subject}}]},
+                        "總頁數/題數": {"number": 1},
+                        "已完成頁數/題數": {"number": 0}
+                    }
+                    if file_url:
+                        properties["照片上傳"] = {"files": [{"name": "Telegram Photo", "type": "external", "external": {"url": file_url}}]}
+                        
+                    create_page(TODO_ACTIVITIES_DB_ID, properties)
+                    send_telegram_message(f"已成功新增待辦：{name} (科目: {subject}, 截止: {due_date})")
+
+            elif cmd_type == "finish":
+                cmd_data = parse_finish_command(text)
+                if cmd_data:
+                    name = cmd_data["name"]
+                    actual_time = cmd_data["actual_time"]
+                    
+                    todo_query = {
+                        "filter": {
+                            "and": [
+                                {"property": "名稱", "title": {"contains": name}}
+                            ]
+                        }
+                    }
+                    candidates = query_database_all(TODO_ACTIVITIES_DB_ID, todo_query)
+                    target_row = None
+                    for row in candidates:
+                        if not is_task_completed(row):
+                            target_row = row
+                            break
+                            
+                    if target_row:
+                        total_pages = get_number(target_row, "總頁數/題數") or 1
+                        time_spent = 45
+                        if actual_time.isdigit():
+                            time_spent = int(actual_time)
+                            
+                        update_properties = {
+                            "已完成頁數/題數": {"number": total_pages},
+                            "實際耗時": {"number": time_spent}
+                        }
+                        update_page(target_row["id"], update_properties)
+                        send_telegram_message(f"已將待辦【{get_title(target_row, '名稱')}】標記為完成，耗時 {time_spent} 分鐘。")
+                    else:
+                        send_telegram_message(f"找不到名稱包含【{name}】且未完成的待辦事項。")
+
+            elif cmd_type == "act":
+                cmd_data = parse_act_command(text)
+                if cmd_data:
+                    name = cmd_data["name"]
+                    date_val = cmd_data["date"]
+                    
+                    if (name == "#" or date_val == "#") and file_bytes:
+                        try:
+                            res_json = analyze_activity_brochure_bytes(file_bytes, name if name != "#" else "")
+                            events = res_json.get("events", [])
+                            if events:
+                                first_event = events[0]
+                                act_name = first_event.get("name", "未命名活動")
+                                act_type = first_event.get("type", "其他")
+                                act_date = first_event.get("date", today_str)
+                                act_note = first_event.get("note", "")
+                                
+                                properties = {
+                                    "活動名稱": {"title": [{"text": {"content": act_name}}]},
+                                    "類型": {"select": {"name": act_type}},
+                                    "日期": {"date": {"start": act_date}},
+                                    "備註": {"rich_text": [{"text": {"content": act_note}}]}
+                                }
+                                if file_url:
+                                    properties["簡章上傳"] = {"files": [{"name": "Telegram Brochure", "type": "external", "external": {"url": file_url}}]}
+                                    
+                                create_page(ACTIVITIES_DB_ID, properties)
+                                send_telegram_message(f"已成功由簡章解析並新增主活動：{act_name} (日期: {act_date})")
+                                
+                                for event in events[1:]:
+                                    new_row_properties = {
+                                        "活動名稱": {"title": [{"text": {"content": event.get("name", "未命名活動")}}]},
+                                        "類型": {"select": {"name": event.get("type", "其他")}},
+                                        "日期": {"date": {"start": event.get("date", today_str)}},
+                                        "備註": {"rich_text": [{"text": {"content": f"由 {act_name} 簡章自動生成\n---\n系統提取資訊：{event.get('note', '')}"}}]}
+                                    }
+                                    create_page(ACTIVITIES_DB_ID, new_row_properties)
+                                    print(f"已新增活動事件: {event.get('name')}")
+                            else:
+                                send_telegram_message("未能從簡章中提取出任何符合身分之活動。")
+                        except Exception as gem_err:
+                            print(f"Gemini 輔助提取簡章失敗: {gem_err}")
+                            send_telegram_message("由簡章分析活動失敗。")
+                    else:
+                        if name == "#": name = "未命名活動"
+                        if date_val == "#": date_val = today_str
+                        
+                        properties = {
+                            "活動名稱": {"title": [{"text": {"content": name}}]},
+                            "日期": {"date": {"start": date_val}},
+                            "類型": {"select": {"name": "其他"}}
+                        }
+                        if file_url:
+                            properties["簡章上傳"] = {"files": [{"name": "Telegram Brochure", "type": "external", "external": {"url": file_url}}]}
+                            
+                        create_page(ACTIVITIES_DB_ID, properties)
+                        send_telegram_message(f"已成功新增活動：{name} (日期: {date_val})")
+        except Exception as proc_err:
+            print(f"處理指令出錯 [{text}]: {proc_err}")
+            send_telegram_message(f"處理指令出錯：{proc_err}")
+
+    if max_update_id > 0:
+        try:
+            ack_url = f"{url}?offset={max_update_id + 1}"
+            requests.get(ack_url).raise_for_status()
+            print(f"已確認更新，新 offset: {max_update_id + 1}")
+        except Exception as e:
+            print(f"確認 Telegram 更新失敗: {e}")
 
 # ==================== 寒暑假判定 ====================
 
@@ -253,9 +539,10 @@ def analyze_todo_photo(image_url, today_str):
     print(f"開始分析聯絡簿/考卷/回條照片: {image_url[:60]}...")
     resp = requests.get(image_url)
     resp.raise_for_status()
-    content = resp.content
+    return analyze_todo_photo_bytes(resp.content, today_str)
+
+def analyze_todo_photo_bytes(content, today_str):
     mime_type = get_file_mime_type(content)
-    
     prompt = f"""
     請幫我分析這張聯絡簿、考卷或回條照片，提取出重要的待辦事項、小考、段考、回條或報名表資訊：
     1. name (事項描述或名稱，例如 "數學課本 P.10-P.12 習題"、"英文單字 L3 小考"、"家長同意書回條"，請用繁體中文)
@@ -285,7 +572,9 @@ def analyze_activity_brochure(image_url, user_instruction=""):
     print(f"開始分析活動簡章照片: {image_url[:60]}...")
     resp = requests.get(image_url)
     resp.raise_for_status()
-    content = resp.content
+    return analyze_activity_brochure_bytes(resp.content, user_instruction)
+
+def analyze_activity_brochure_bytes(content, user_instruction=""):
     mime_type = get_file_mime_type(content)
     
     prompt = """
@@ -298,7 +587,7 @@ def analyze_activity_brochure(image_url, user_instruction=""):
     請自動過濾掉不符合此身分、或此身分無法參加的活動。例如：
     - 僅限高職生（或綜合高中專門學程）參加的活動 -> 過濾掉不建立事件
     - 僅限高三（或即將畢業之高三生）參加的活動 -> 過濾掉不建立事件
-    - 僅限國中或國小學生參加的活動 -> 過濾掉不建立事件
+    - 僅限國中或國小學生參加的活動 ->過濾掉不建立事件
     - 僅限大專院校、大學以上參加的活動 -> 過濾掉不建立事件
     如果整個活動/簡章都不符身分，請回傳空的 events 列表。
     
@@ -1186,6 +1475,9 @@ def main():
         print(f"使用測試日期: {today_dt.strftime('%Y-%m-%d')}")
     else:
         today_dt = now
+
+    # 執行 Telegram 指令處理
+    process_telegram_commands(today_dt)
 
     if mode == "A":
         run_mode_a(today_dt)

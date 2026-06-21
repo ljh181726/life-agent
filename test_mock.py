@@ -278,6 +278,7 @@ main.analyze_activity_brochure = mock_analyze_activity_brochure
 main.send_telegram_message = mock_send_telegram_message
 main.get_bot_user_id = lambda: "mock_bot_user_id"
 main.ACTIVITIES_DB_ID = "mock_activities_db"
+main.process_telegram_commands = lambda today_dt: print("[Telegram Mock] 執行指令處理 (跳過實體 API)...")
 
 # ==================== 執行測試 ====================
 
