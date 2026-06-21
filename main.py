@@ -292,7 +292,17 @@ def analyze_activity_brochure(image_url, user_instruction=""):
     請幫我分析這張活動簡章或海報照片/文件，提取出其中所有關鍵的時段/日期（例如：報名截止日、初賽日期、複賽日期、營隊活動日期等）。
     對於每一個提取出的時段/日期，請建立一個獨立的活動事件。
     
-    請為每個事件提取以下欄位：
+    【重要篩選前提 - 使用者身分過濾】
+    使用者身分是：台灣「114學年度入學的高雄中學科學班學生」。
+    也就是：目前（2026年6月）為高一升高二的普通高中學生（非高職生）。
+    請自動過濾掉不符合此身分、或此身分無法參加的活動。例如：
+    - 僅限高職生（或綜合高中專門學程）參加的活動 -> 過濾掉不建立事件
+    - 僅限高三（或即將畢業之高三生）參加的活動 -> 過濾掉不建立事件
+    - 僅限國中或國小學生參加的活動 -> 過濾掉不建立事件
+    - 僅限大專院校、大學以上參加的活動 -> 過濾掉不建立事件
+    如果整個活動/簡章都不符身分，請回傳空的 events 列表。
+    
+    對於符合身分可以參加的事件，請提取以下欄位：
     1. name (事件名稱，請用繁體中文。請結合活動主名稱與該日期的項目，例如 "YTP 少年圖靈計畫 - 線上初賽"、"YTP 少年圖靈計畫 - 報名截止")
     2. type (類型，必須是以下選項之一："講座"、"營隊"、"比賽"、"志工"、"休閒"、"其他")
     3. date (活動日期，格式為 YYYY-MM-DD，若是範圍請填寫開始日期)
@@ -302,7 +312,7 @@ def analyze_activity_brochure(image_url, user_instruction=""):
         prompt += f"\n\n請特別注意！使用者給出了以下特定提取指令：\n\"{user_instruction}\"\n請務必依據此指定指令，在簡章中優先找出使用者關心的活動時段或日期，並列在事件列表中。"
         
     prompt += """
-    請僅返回以下 JSON 格式（其中 events 是一個陣列，包含所有找到的事件，至少包含一個主事件），不要包含 any markdown 標記：
+    請僅返回以下 JSON 格式（其中 events 是一個陣列，包含所有找到的事件，至少包含一個主事件。若完全不符身分，請返回空的 events 陣列），不要包含 any markdown 標記：
     {
       "events": [
         {
@@ -460,7 +470,15 @@ def run_mode_a(today_dt):
                                 create_page(ACTIVITIES_DB_ID, new_row_properties)
                                 print(f"已新增活動事件: {event.get('name')}")
                         else:
-                            print(f"未能從簡章中提取出任何活動事件。")
+                            print(f"未能從簡章中提取出任何符合身分之活動事件，將該列標註為不符身分跳過。")
+                            original_title = get_title(row, "活動名稱")
+                            new_title = original_title if original_title else "不符身分之活動"
+                            update_properties = {
+                                "活動名稱": {"title": [{"text": {"content": new_title}}]},
+                                "日期": {"date": {"start": today_str}},
+                                "備註": {"rich_text": [{"text": {"content": f"{clean_user_note}\n---\n系統提取資訊：此活動不符合您的身分（114學年度雄中科學班高一升高二），已自動跳過。"}}]}
+                            }
+                            update_page(row["id"], update_properties)
                     except Exception as e:
                         print(f"處理活動簡章照片失敗: {e}")
         except Exception as e:
