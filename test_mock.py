@@ -222,12 +222,20 @@ def mock_delete_page(page_id):
 def mock_analyze_activity_brochure(image_url, user_instruction=""):
     print(f"[Gemini Mock API] 辨識活動簡章 {image_url[:40]}...，特別指令: {user_instruction}")
     return {
-        "name": "2026 青年AI科學夏令營",
-        "type": "營隊",
-        "date": "2026-06-22",
-        "note": f"時間：09:00-17:00，地點：台大，費用：免費 (指令：{user_instruction})" if user_instruction else "時間：09:00-17:00，地點：台大，費用：免費",
-        "deadline": "2026-06-10",
-        "other_date": "2026-08-01"
+        "events": [
+            {
+                "name": "2026 青年AI科學夏令營 - 第一期",
+                "type": "營隊",
+                "date": "2026-06-22",
+                "note": f"時間：09:00-17:00，地點：台大，費用：免費 (指令：{user_instruction})" if user_instruction else "時間：09:00-17:00，地點：台大，費用：免費"
+            },
+            {
+                "name": "2026 青年AI科學夏令營 - 報名截止",
+                "type": "其他",
+                "date": "2026-06-10",
+                "note": "名額有限，報完為止"
+            }
+        ]
     }
 
 def mock_analyze_receipt(image_url):

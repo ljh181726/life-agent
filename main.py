@@ -289,26 +289,35 @@ def analyze_activity_brochure(image_url, user_instruction=""):
     mime_type = get_file_mime_type(content)
     
     prompt = """
-    請幫我分析這張活動簡章或海報照片，提取以下欄位：
-    1. name (活動名稱，請用繁體中文)
+    請幫我分析這張活動簡章或海報照片/文件，提取出其中所有關鍵的時段/日期（例如：報名截止日、初賽日期、複賽日期、營隊活動日期等）。
+    對於每一個提取出的時段/日期，請建立一個獨立的活動事件。
+    
+    請為每個事件提取以下欄位：
+    1. name (事件名稱，請用繁體中文。請結合活動主名稱與該日期的項目，例如 "YTP 少年圖靈計畫 - 線上初賽"、"YTP 少年圖靈計畫 - 報名截止")
     2. type (類型，必須是以下選項之一："講座"、"營隊"、"比賽"、"志工"、"休閒"、"其他")
-    3. date (活動日期，格式為 YYYY-MM-DD，若有範圍請填寫開始日期)
-    4. note (簡短備註，提取時間、地點、費用或重要資訊，50字以內)
-    5. deadline (報名截止日，格式為 YYYY-MM-DD，若未提及請填 null)
-    6. other_date (其他日期，例如複賽日期、活動第二階段日期等，格式為 YYYY-MM-DD，若無請填 null)
+    3. date (活動日期，格式為 YYYY-MM-DD，若是範圍請填寫開始日期)
+    4. note (簡短備註，提取該事件的時間、地點、費用、組隊要求或重要資訊，50字以內)
     """
     if user_instruction:
-        prompt += f"\n\n請特別注意！使用者給出了以下特定提取指令：\n\"{user_instruction}\"\n請特別依據此指定指令，在簡章中找出對應的活動日期（填入 date 欄位）、報名截止日（填入 deadline 欄位）、其他日期（填入 other_date 欄位），並將細節摘要填入 note 欄位。"
+        prompt += f"\n\n請特別注意！使用者給出了以下特定提取指令：\n\"{user_instruction}\"\n請務必依據此指定指令，在簡章中優先找出使用者關心的活動時段或日期，並列在事件列表中。"
         
     prompt += """
-    請僅返回以下 JSON 格式，不要包含 any markdown 標記：
+    請僅返回以下 JSON 格式（其中 events 是一個陣列，包含所有找到的事件，至少包含一個主事件），不要包含 any markdown 標記：
     {
-      "name": "活動名稱",
-      "type": "講座",
-      "date": "2026-07-01",
-      "note": "時間：10:00，地點：台大，費用：免費",
-      "deadline": "2026-06-10",
-      "other_date": "2026-08-01"
+      "events": [
+        {
+          "name": "活動名稱 - 線上初賽",
+          "type": "比賽",
+          "date": "2026-07-07",
+          "note": "初賽將於線上舉行"
+        },
+        {
+          "name": "活動名稱 - 報名截止",
+          "type": "其他",
+          "date": "2026-06-10",
+          "note": "需組隊報名，高中組3人"
+        }
+      ]
     }
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
@@ -400,9 +409,7 @@ def run_mode_a(today_dt):
                     {
                         "or": [
                             {"property": "活動名稱", "title": {"is_empty": True}},
-                            {"property": "日期", "date": {"is_empty": True}},
-                            {"property": "報名截止日", "date": {"is_empty": True}},
-                            {"property": "其他日期", "date": {"is_empty": True}}
+                            {"property": "日期", "date": {"is_empty": True}}
                         ]
                     }
                 ]
@@ -418,32 +425,42 @@ def run_mode_a(today_dt):
                         clean_user_note = original_note.split("\n---\n系統提取資訊：")[0].strip()
                         res_data = analyze_activity_brochure(img_url, clean_user_note)
                         
-                        extracted_note = res_data.get("note", "")
-                        if extracted_note:
-                            if clean_user_note:
-                                combined_note = f"{clean_user_note}\n---\n系統提取資訊：{extracted_note}"
+                        events = res_data.get("events", [])
+                        if events:
+                            first_event = events[0]
+                            extracted_note = first_event.get("note", "")
+                            if extracted_note:
+                                if clean_user_note:
+                                    combined_note = f"{clean_user_note}\n---\n系統提取資訊：{extracted_note}"
+                                else:
+                                    combined_note = extracted_note
                             else:
-                                combined_note = extracted_note
-                        else:
-                            combined_note = clean_user_note
+                                combined_note = clean_user_note
 
-                        update_properties = {
-                            "活動名稱": {"title": [{"text": {"content": get_title(row, "活動名稱") or res_data.get("name", "未命名活動")}}]},
-                            "類型": {"select": {"name": get_select(row, "類型") or res_data.get("type", "其他")}},
-                            "日期": {"date": {"start": get_date(row, "日期") or res_data.get("date", today_str)}},
-                            "備註": {"rich_text": [{"text": {"content": combined_note}}]}
-                        }
-                        
-                        deadline_val = get_date(row, "報名截止日") or res_data.get("deadline")
-                        if deadline_val:
-                            update_properties["報名截止日"] = {"date": {"start": deadline_val}}
-                            
-                        other_date_val = get_date(row, "其他日期") or res_data.get("other_date")
-                        if other_date_val:
-                            update_properties["其他日期"] = {"date": {"start": other_date_val}}
-                            
-                        update_page(row["id"], update_properties)
-                        print(f"已回填活動: {res_data.get('name')}")
+                            original_title = get_title(row, "活動名稱")
+                            new_title = first_event.get("name") or original_title or "未命名活動"
+
+                            update_properties = {
+                                "活動名稱": {"title": [{"text": {"content": new_title}}]},
+                                "類型": {"select": {"name": get_select(row, "類型") or first_event.get("type", "其他")}},
+                                "日期": {"date": {"start": get_date(row, "日期") or first_event.get("date", today_str)}},
+                                "備註": {"rich_text": [{"text": {"content": combined_note}}]}
+                            }
+                            update_page(row["id"], update_properties)
+                            print(f"已回填主活動: {new_title}")
+
+                            # 建立其他事件的新列
+                            for event in events[1:]:
+                                new_row_properties = {
+                                    "活動名稱": {"title": [{"text": {"content": event.get("name", "未命名活動")}}]},
+                                    "類型": {"select": {"name": event.get("type", "其他")}},
+                                    "日期": {"date": {"start": event.get("date", today_str)}},
+                                    "備註": {"rich_text": [{"text": {"content": f"由 {new_title} 簡章自動生成\n---\n系統提取資訊：{event.get('note', '')}"}}]}
+                                }
+                                create_page(ACTIVITIES_DB_ID, new_row_properties)
+                                print(f"已新增活動事件: {event.get('name')}")
+                        else:
+                            print(f"未能從簡章中提取出任何活動事件。")
                     except Exception as e:
                         print(f"處理活動簡章照片失敗: {e}")
         except Exception as e:
