@@ -208,11 +208,23 @@ def is_vacation(check_date):
 
 # ==================== 視覺辨識 (Gemini API) ====================
 
+def get_file_mime_type(content):
+    if content.startswith(b'%PDF'):
+        return 'application/pdf'
+    if content.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if content.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if content.startswith(b'RIFF') and content[8:12] == b'WEBP':
+        return 'image/webp'
+    return 'image/jpeg'
+
 def analyze_receipt(image_url):
     print(f"開始分析發票照片: {image_url[:60]}...")
     resp = requests.get(image_url)
     resp.raise_for_status()
-    img = Image.open(io.BytesIO(resp.content))
+    content = resp.content
+    mime_type = get_file_mime_type(content)
     
     prompt = """
     請幫我分析這張發票或收據照片，提取以下欄位：
@@ -228,14 +240,21 @@ def analyze_receipt(image_url):
     }
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
-    response = model.generate_content([img, prompt], generation_config={"response_mime_type": "application/json"})
+    response = model.generate_content([
+        {
+            'mime_type': mime_type,
+            'data': content
+        },
+        prompt
+    ], generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text.strip())
 
 def analyze_todo_photo(image_url, today_str):
     print(f"開始分析聯絡簿/考卷/回條照片: {image_url[:60]}...")
     resp = requests.get(image_url)
     resp.raise_for_status()
-    img = Image.open(io.BytesIO(resp.content))
+    content = resp.content
+    mime_type = get_file_mime_type(content)
     
     prompt = f"""
     請幫我分析這張聯絡簿、考卷或回條照片，提取出重要的待辦事項、小考、段考、回條或報名表資訊：
@@ -253,14 +272,21 @@ def analyze_todo_photo(image_url, today_str):
     }
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
-    response = model.generate_content([img, prompt], generation_config={"response_mime_type": "application/json"})
+    response = model.generate_content([
+        {
+            'mime_type': mime_type,
+            'data': content
+        },
+        prompt
+    ], generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text.strip())
 
 def analyze_activity_brochure(image_url):
     print(f"開始分析活動簡章照片: {image_url[:60]}...")
     resp = requests.get(image_url)
     resp.raise_for_status()
-    img = Image.open(io.BytesIO(resp.content))
+    content = resp.content
+    mime_type = get_file_mime_type(content)
     
     prompt = """
     請幫我分析這張活動簡章或海報照片，提取以下欄位：
@@ -278,7 +304,13 @@ def analyze_activity_brochure(image_url):
     }
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
-    response = model.generate_content([img, prompt], generation_config={"response_mime_type": "application/json"})
+    response = model.generate_content([
+        {
+            'mime_type': mime_type,
+            'data': content
+        },
+        prompt
+    ], generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text.strip())
 
 # ==================== 核心邏輯 A：下午 5:00 執行 ====================
@@ -323,8 +355,9 @@ def run_mode_a(today_dt):
                 {"property": "照片上傳", "files": {"is_not_empty": True}},
                 {
                     "or": [
-                        {"property": "相關科目", "rich_text": {"is_empty": True}},
-                        {"property": "名稱", "title": {"is_empty": True}}
+                        {"property": "名稱", "title": {"is_empty": True}},
+                        {"property": "截止或考試日期", "date": {"is_empty": True}},
+                        {"property": "相關科目", "rich_text": {"is_empty": True}}
                     ]
                 }
             ]
@@ -337,13 +370,13 @@ def run_mode_a(today_dt):
             try:
                 res_data = analyze_todo_photo(img_url, today_str)
                 update_properties = {
-                    "名稱": {"title": [{"text": {"content": res_data.get("name", "未命名事項")}}]},
-                    "類型": {"select": {"name": res_data.get("type", "作業")}},
-                    "開始日期": {"date": {"start": today_str}},
-                    "截止或考試日期": {"date": {"start": res_data.get("due_date", today_str)}},
-                    "相關科目": {"rich_text": [{"text": {"content": res_data.get("subject", "無")}}]},
-                    "總頁數/題數": {"number": 1},
-                    "已完成頁數/題數": {"number": 0}
+                    "名稱": {"title": [{"text": {"content": get_title(row, "名稱") or res_data.get("name", "未命名事項")}}]},
+                    "類型": {"select": {"name": get_select(row, "類型") or res_data.get("type", "作業")}},
+                    "開始日期": {"date": {"start": get_date(row, "開始日期") or today_str}},
+                    "截止或考試日期": {"date": {"start": get_date(row, "截止或考試日期") or res_data.get("due_date", today_str)}},
+                    "相關科目": {"rich_text": [{"text": {"content": get_rich_text(row, "相關科目") or res_data.get("subject", "無")}}]},
+                    "總頁數/題數": {"number": get_number(row, "總頁數/題數") if get_number(row, "總頁數/題數") is not None else 1},
+                    "已完成頁數/題數": {"number": get_number(row, "已完成頁數/題數") if get_number(row, "已完成頁數/題數") is not None else 0}
                 }
                 update_page(row["id"], update_properties)
                 print(f"已回填待辦: {res_data.get('name')}，相關科目: {res_data.get('subject')}")
@@ -356,7 +389,12 @@ def run_mode_a(today_dt):
             "filter": {
                 "and": [
                     {"property": "簡章上傳", "files": {"is_not_empty": True}},
-                    {"property": "活動名稱", "title": {"is_empty": True}}
+                    {
+                        "or": [
+                            {"property": "活動名稱", "title": {"is_empty": True}},
+                            {"property": "日期", "date": {"is_empty": True}}
+                        ]
+                    }
                 ]
             }
         }
@@ -368,10 +406,10 @@ def run_mode_a(today_dt):
                     try:
                         res_data = analyze_activity_brochure(img_url)
                         update_properties = {
-                            "活動名稱": {"title": [{"text": {"content": res_data.get("name", "未命名活動")}}]},
-                            "類型": {"select": {"name": res_data.get("type", "其他")}},
-                            "日期": {"date": {"start": res_data.get("date", today_str)}},
-                            "備註": {"rich_text": [{"text": {"content": res_data.get("note", "")}}]}
+                            "活動名稱": {"title": [{"text": {"content": get_title(row, "活動名稱") or res_data.get("name", "未命名活動")}}]},
+                            "類型": {"select": {"name": get_select(row, "類型") or res_data.get("type", "其他")}},
+                            "日期": {"date": {"start": get_date(row, "日期") or res_data.get("date", today_str)}},
+                            "備註": {"rich_text": [{"text": {"content": get_rich_text(row, "備註") or res_data.get("note", "")}}]}
                         }
                         update_page(row["id"], update_properties)
                         print(f"已回填活動: {res_data.get('name')}")
