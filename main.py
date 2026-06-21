@@ -208,66 +208,104 @@ def get_telegram_file_url(file_id):
         return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
     return None
 
-def parse_hw_command(text):
-    parts = text.strip().split()
-    if len(parts) < 2:
-        return None
+def parse_hw_command(text, today_str):
+    raw_content = text[3:].strip()
+    if not raw_content or raw_content == "#" or raw_content.replace("#", "").strip() == "":
+        return {"name": "#", "subject": "#", "due_date": "#"}
     
-    due_date = "#"
-    subject = "#"
-    
-    if len(parts) >= 4:
-        last_part = parts[-1]
-        if last_part == "#" or (len(last_part) == 10 and last_part[4] == '-' and last_part[7] == '-'):
-            due_date = last_part
-            subject = parts[-2]
-            name = " ".join(parts[1:-2])
+    try:
+        prompt = f"""
+        請幫我從以下功課/待辦事項敘述中，提取出指定格式的欄位值：
+        1. name: 功課名稱或描述（使用繁體中文）。如果敘述中有包含科目名稱，請將科目從名稱中抽離（例如「英文閱讀報告」-> name為「閱讀報告」）。如果內容只包含 "#"，請填寫 "#"。
+        2. subject: 相關科目（例如：數學、英文、化學、國文、物理等。若無或無法辨識請填 "無"。若只包含 "#"，請填寫 "#"）。
+        3. due_date: 截止日期（格式必須為 YYYY-MM-DD）。
+           - 如果敘述中提到的是月份/日期（如 6/21、6/22 晚上 6:00 前、6/28 晚上 12:00 等），請結合今天日期 {today_str} 來推理出正確的西元年月日。
+           - 如果提到相對日期（如明天、下週一），也請結合今天日期 {today_str} 推理出正確的西元年月日。
+           - 若未提及截止日期，或者內容只包含 "#"，請填寫 "#"。
+
+        待解析敘述：
+        "{raw_content}"
+
+        請僅返回以下 JSON 格式，不要包含任何 markdown 標記（如 ```json 等）：
+        {{
+          "name": "功課名稱",
+          "subject": "數學",
+          "due_date": "2026-06-22"
+        }}
+        """
+        model = genai.GenerativeModel('gemini-3.1-flash-lite')
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        return json.loads(response.text.strip())
+    except Exception as e:
+        print(f"Gemini parse_hw_command 失敗: {e}")
+        parts = raw_content.split()
+        sub = "無"
+        if len(parts) >= 2:
+            sub = parts[-1]
+            nm = " ".join(parts[:-1])
         else:
-            subject = parts[-1]
-            name = " ".join(parts[1:-1])
-    elif len(parts) == 3:
-        subject = parts[-1]
-        name = parts[1]
-    else:
-        name = parts[1]
-        
-    return {"name": name, "subject": subject, "due_date": due_date}
+            nm = raw_content
+        return {"name": nm, "subject": sub, "due_date": "#"}
 
 def parse_finish_command(text):
-    parts = text.strip().split()
-    if len(parts) < 2:
-        return None
+    raw_content = text[7:].strip()
+    if not raw_content or raw_content == "#" or raw_content.replace("#", "").strip() == "":
+        return {"name": "#", "actual_time": "#"}
     
-    actual_time = "#"
-    if len(parts) >= 3:
-        last_part = parts[-1]
-        if last_part.isdigit() or last_part == "#":
-            actual_time = last_part
-            name = " ".join(parts[1:-1])
-        else:
-            name = " ".join(parts[1:])
-    else:
-        name = parts[1]
-        
-    return {"name": name, "actual_time": actual_time}
+    try:
+        prompt = f"""
+        請幫我從以下完成事項的敘述中，提取出：
+        1. name: 待辦事項名稱或關鍵字（用以在資料庫中比對尋找。若只包含 "#"，請填寫 "#"）。
+        2. actual_time: 實際耗時（必須是表示分鐘的整數數字字串，例如 "60"）。若敘述中提到時間（如「耗時 1 小時」、「寫了 90 分鐘」），請換算成以分鐘為單位的整數。若敘述中沒有提及耗時，請填寫 "#"。
 
-def parse_act_command(text):
-    parts = text.strip().split()
-    if len(parts) < 2:
-        return None
+        待解析敘述：
+        "{raw_content}"
+
+        請僅返回以下 JSON 格式，不要包含任何 markdown 標記（如 ```json 等）：
+        {{
+          "name": "事項名稱",
+          "actual_time": "60"
+        }}
+        """
+        model = genai.GenerativeModel('gemini-3.1-flash-lite')
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        return json.loads(response.text.strip())
+    except Exception as e:
+        print(f"Gemini parse_finish_command 失敗: {e}")
+        parts = raw_content.split()
+        if len(parts) >= 2 and parts[-1].isdigit():
+            return {"name": " ".join(parts[:-1]), "actual_time": parts[-1]}
+        return {"name": raw_content, "actual_time": "#"}
+
+def parse_act_command(text, today_str):
+    raw_content = text[4:].strip()
+    if not raw_content or raw_content == "#" or raw_content.replace("#", "").strip() == "":
+        return {"name": "#", "date": "#"}
     
-    date_val = "#"
-    if len(parts) >= 3:
-        last_part = parts[-1]
-        if last_part == "#" or (len(last_part) == 10 and last_part[4] == '-' and last_part[7] == '-'):
-            date_val = last_part
-            name = " ".join(parts[1:-1])
-        else:
-            name = " ".join(parts[1:])
-    else:
-        name = parts[1]
-        
-    return {"name": name, "date": date_val}
+    try:
+        prompt = f"""
+        請幫我從以下活動敘述中，提取出：
+        1. name: 活動名稱（使用繁體中文。若只包含 "#"，請填寫 "#"）。
+        2. date: 活動日期（格式必須為 YYYY-MM-DD）。
+           - 如果敘述中提到的是月份/日期（如 7/7、8/1 等），請結合今天日期 {today_str} 來推理出正確的西元年月日。
+           - 如果提到相對日期（如明天、下週一），也請結合今天日期 {today_str} 推理出正確的西元年月日。
+           - 若未提及活動日期，或者內容只包含 "#"，請填寫 "#"。
+
+        待解析敘述：
+        "{raw_content}"
+
+        請僅返回以下 JSON 格式，不要包含任何 markdown 標記（如 ```json 等）：
+        {{
+          "name": "活動名稱",
+          "date": "2026-07-07"
+        }}
+        """
+        model = genai.GenerativeModel('gemini-3.1-flash-lite')
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        return json.loads(response.text.strip())
+    except Exception as e:
+        print(f"Gemini parse_act_command 失敗: {e}")
+        return {"name": raw_content, "date": "#"}
 
 def process_telegram_commands(today_dt):
     if not TELEGRAM_BOT_TOKEN:
@@ -339,7 +377,7 @@ def process_telegram_commands(today_dt):
 
         try:
             if cmd_type == "hw":
-                cmd_data = parse_hw_command(text)
+                cmd_data = parse_hw_command(text, today_str)
                 if cmd_data:
                     name = cmd_data["name"]
                     subject = cmd_data["subject"]
@@ -412,7 +450,7 @@ def process_telegram_commands(today_dt):
                         send_telegram_message(f"找不到名稱包含【{name}】且未完成的待辦事項。")
 
             elif cmd_type == "act":
-                cmd_data = parse_act_command(text)
+                cmd_data = parse_act_command(text, today_str)
                 if cmd_data:
                     name = cmd_data["name"]
                     date_val = cmd_data["date"]
