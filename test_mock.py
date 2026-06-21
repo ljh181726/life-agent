@@ -131,6 +131,32 @@ mock_ledger = [
 # 5. 每週行事曆模擬
 mock_weekly_calendar = []
 
+# 6. 活動資料庫模擬
+mock_activities = [
+    # 今天已有的活動
+    {
+        "id": "act_1",
+        "properties": {
+            "活動名稱": {"title": [{"text": {"content": "AI 科學黑客松比賽"}}]},
+            "日期": {"date": {"start": "2026-06-21"}},
+            "類型": {"select": {"name": "比賽"}},
+            "簡章上傳": {"files": []},
+            "備註": {"rich_text": []}
+        }
+    },
+    # 新上傳簡章但欄位未填的活動
+    {
+        "id": "act_vision",
+        "properties": {
+            "活動名稱": {"title": []},
+            "日期": {"date": None},
+            "類型": {"select": None},
+            "簡章上傳": {"files": [{"type": "external", "external": {"url": "https://example.com/mock_brochure.jpg"}}]},
+            "備註": {"rich_text": []}
+        }
+    }
+]
+
 # ==================== MOCKING Notion & Gemini API ====================
 
 def mock_query_database_all(database_id, filter_payload=None):
@@ -158,11 +184,15 @@ def mock_query_database_all(database_id, filter_payload=None):
         return mock_ledger
     elif database_id == main.WEEKLY_CALENDAR_DB_ID:
         return mock_weekly_calendar
+    elif database_id == main.ACTIVITIES_DB_ID:
+        if filter_payload and "簡章上傳" in str(filter_payload):
+            return [x for x in mock_activities if x.get("id") == "act_vision"]
+        return mock_activities
     return []
 
 def mock_update_page(page_id, properties):
     # 尋找並更新模擬物件
-    for db in [mock_todo_activities, mock_book_tracker, mock_ledger, mock_weekly_calendar]:
+    for db in [mock_todo_activities, mock_book_tracker, mock_ledger, mock_weekly_calendar, mock_activities]:
         for item in db:
             if item.get("id") == page_id:
                 for k, v in properties.items():
@@ -188,6 +218,15 @@ def mock_delete_page(page_id):
     mock_weekly_calendar = [x for x in mock_weekly_calendar if x.get("id") != page_id]
     print(f"[Notion Mock API] 已刪除/封存 Page: {page_id}")
     return {}
+
+def mock_analyze_activity_brochure(image_url):
+    print(f"[Gemini Mock API] 辨識活動簡章 {image_url[:40]}...")
+    return {
+        "name": "2026 青年AI科學夏令營",
+        "type": "營隊",
+        "date": "2026-06-22",
+        "note": "時間：09:00-17:00，地點：台大，費用：免費"
+    }
 
 def mock_analyze_receipt(image_url):
     print(f"[Gemini Mock API] 辨識收據照片 {image_url[:40]}...")
@@ -225,8 +264,10 @@ main.create_page = mock_create_page
 main.delete_page = mock_delete_page
 main.analyze_receipt = mock_analyze_receipt
 main.analyze_todo_photo = mock_analyze_todo_photo
+main.analyze_activity_brochure = mock_analyze_activity_brochure
 main.send_telegram_message = mock_send_telegram_message
 main.get_bot_user_id = lambda: "mock_bot_user_id"
+main.ACTIVITIES_DB_ID = "mock_activities_db"
 
 # ==================== 執行測試 ====================
 

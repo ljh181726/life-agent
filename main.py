@@ -34,6 +34,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # Notion Database IDs
 FIXED_SCHEDULE_DB_ID = os.environ.get("NOTION_FIXED_SCHEDULE_DB_ID")
 TODO_ACTIVITIES_DB_ID = os.environ.get("NOTION_TODO_ACTIVITIES_DB_ID")
+ACTIVITIES_DB_ID = os.environ.get("NOTION_ACTIVITIES_DB_ID")
 BOOK_TRACKER_DB_ID = os.environ.get("NOTION_BOOK_TRACKER_DB_ID")
 LEDGER_DB_ID = os.environ.get("NOTION_LEDGER_DB_ID")
 WEEKLY_CALENDAR_DB_ID = os.environ.get("NOTION_WEEKLY_CALENDAR_DB_ID")
@@ -255,6 +256,31 @@ def analyze_todo_photo(image_url, today_str):
     response = model.generate_content([img, prompt], generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text.strip())
 
+def analyze_activity_brochure(image_url):
+    print(f"開始分析活動簡章照片: {image_url[:60]}...")
+    resp = requests.get(image_url)
+    resp.raise_for_status()
+    img = Image.open(io.BytesIO(resp.content))
+    
+    prompt = """
+    請幫我分析這張活動簡章或海報照片，提取以下欄位：
+    1. name (活動名稱，請用繁體中文)
+    2. type (類型，必須是以下選項之一："講座"、"營隊"、"比賽"、"志工"、"休閒"、"其他")
+    3. date (活動日期，格式為 YYYY-MM-DD，若有範圍請填寫開始日期)
+    4. note (簡短備註，提取時間、地點、費用或重要資訊，50字以內)
+
+    請僅返回以下 JSON 格式，不要包含 any markdown 標記：
+    {
+      "name": "活動名稱",
+      "type": "講座",
+      "date": "2026-07-01",
+      "note": "時間：10:00，地點：台大，費用：免費"
+    }
+    """
+    model = genai.GenerativeModel('gemini-3.1-flash-lite')
+    response = model.generate_content([img, prompt], generation_config={"response_mime_type": "application/json"})
+    return json.loads(response.text.strip())
+
 # ==================== 核心邏輯 A：下午 5:00 執行 ====================
 
 def run_mode_a(today_dt):
@@ -323,6 +349,36 @@ def run_mode_a(today_dt):
                 print(f"已回填待辦: {res_data.get('name')}，相關科目: {res_data.get('subject')}")
             except Exception as e:
                 print(f"處理待辦照片失敗: {e}")
+
+    # 1.3 活動簡章照片處理
+    if ACTIVITIES_DB_ID:
+        activity_filter = {
+            "filter": {
+                "and": [
+                    {"property": "簡章上傳", "files": {"is_not_empty": True}},
+                    {"property": "活動名稱", "title": {"is_empty": True}}
+                ]
+            }
+        }
+        try:
+            unprocessed_activities = query_database_all(ACTIVITIES_DB_ID, activity_filter)
+            for row in unprocessed_activities:
+                img_url = get_first_file_url(row, "簡章上傳")
+                if img_url:
+                    try:
+                        res_data = analyze_activity_brochure(img_url)
+                        update_properties = {
+                            "活動名稱": {"title": [{"text": {"content": res_data.get("name", "未命名活動")}}]},
+                            "類型": {"select": {"name": res_data.get("type", "其他")}},
+                            "日期": {"date": {"start": res_data.get("date", today_str)}},
+                            "備註": {"rich_text": [{"text": {"content": res_data.get("note", "")}}]}
+                        }
+                        update_page(row["id"], update_properties)
+                        print(f"已回填活動: {res_data.get('name')}")
+                    except Exception as e:
+                        print(f"處理活動簡章照片失敗: {e}")
+        except Exception as e:
+            print(f"讀取未處理活動失敗: {e}")
 
     # 2. 書包物品精準檢查
     # 2.1 撈取明天所需物品與科目
@@ -672,6 +728,32 @@ def run_mode_b(today_dt):
             "end": 17 * 60,
             "type": "上課"
         })
+
+    # 讀取今天活動資料庫中的活動，並作為固定行程（Busy Blocks）避開 (預設 09:00 - 17:00)
+    if ACTIVITIES_DB_ID:
+        try:
+            today_activity_filter = {
+                "filter": {
+                    "and": [
+                        {"property": "日期", "date": {"equals": today_str}}
+                    ]
+                }
+            }
+            today_activities = query_database_all(ACTIVITIES_DB_ID, today_activity_filter)
+            for act in today_activities:
+                name = get_title(act, "活動名稱")
+                a_type = get_select(act, "類型") or "其他"
+                # 預設將活動排在 09:00 - 17:00 區間作為固定行程
+                fixed_events.append({
+                    "name": f"活動：{name}",
+                    "start": 9 * 60,
+                    "end": 17 * 60,
+                    "type": a_type,
+                    "is_user_event": True  # 不需要再寫回行事曆中，因為本來就存在於活動資料庫中
+                })
+                print(f"偵測到今日活動，已加入固定行程: {name}")
+        except Exception as e:
+            print(f"讀取今日活動失敗: {e}")
 
     # 初始化時間表：True 為可用自習，False 為佔用
     day_minutes = [False] * 1440

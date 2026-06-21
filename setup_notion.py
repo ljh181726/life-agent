@@ -62,10 +62,10 @@ def main():
             }
         },
         "NOTION_TODO_ACTIVITIES_DB_ID": {
-            "title": "待辦與活動資料庫",
+            "title": "待辦事項資料庫",
             "properties": {
                 "名稱": {"title": {}},
-                "類型": {"select": {"options": [{"name": "作業"}, {"name": "小考"}, {"name": "段考"}, {"name": "回條"}, {"name": "報名表"}, {"name": "活動"}]}},
+                "類型": {"select": {"options": [{"name": "作業"}, {"name": "小考"}, {"name": "段考"}, {"name": "回條"}, {"name": "報名表"}]}},
                 "開始日期": {"date": {}},
                 "截止或考試日期": {"date": {}},
                 "相關科目": {"rich_text": {}},
@@ -73,6 +73,16 @@ def main():
                 "已完成頁數/題數": {"number": {"format": "number"}},
                 "實際耗時": {"number": {"format": "number"}},
                 "照片上傳": {"files": {}}
+            }
+        },
+        "NOTION_ACTIVITIES_DB_ID": {
+            "title": "活動資料庫",
+            "properties": {
+                "活動名稱": {"title": {}},
+                "日期": {"date": {}},
+                "類型": {"select": {"options": [{"name": "講座"}, {"name": "營隊"}, {"name": "比賽"}, {"name": "志工"}, {"name": "休閒"}, {"name": "其他"}]}},
+                "簡章上傳": {"files": {}},
+                "備註": {"rich_text": {}}
             }
         },
         "NOTION_BOOK_TRACKER_DB_ID": {
@@ -111,6 +121,11 @@ def main():
     # 批次建立資料庫
     url = "https://api.notion.com/v1/databases"
     for env_key, schema in databases_schema.items():
+        if config.get(env_key):
+            print(f"資料庫 {schema['title']} 已存在於 .env 中 (ID: {config[env_key]})，跳過建立。")
+            created_ids[env_key] = config[env_key]
+            continue
+
         payload = {
             "parent": {
                 "type": "page_id",
