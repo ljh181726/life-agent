@@ -983,7 +983,9 @@ def run_mode_b(today_dt):
     
     weighted_subjects = set()
     for t in yesterday_todos:
-        completed = get_number(t, "完成度") or 0
+        total_p = get_number(t, "總頁數/題數") or 1
+        completed_p = get_number(t, "已完成頁數/題數") or 0
+        completed = (completed_p / total_p) * 100 if total_p > 0 else 0
         actual_time = get_number(t, "實際耗時") or 0
         t_type = get_select(t, "類型") or "作業"
         sub = get_rich_text(t, "相關科目")
