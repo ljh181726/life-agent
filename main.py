@@ -17,6 +17,9 @@ if sys.platform.startswith("win"):
 
 # 嘗試自本地的 .env 檔案載入環境變數
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+# Initialize holiday cache on startup
+import holiday_utils
+holiday_utils.refresh_cache_sync()
 if os.path.exists(env_path):
     with open(env_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -30,6 +33,8 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# Helper for Taipei timezone
+_TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 
 # Notion Database IDs
 FIXED_SCHEDULE_DB_ID = os.environ.get("NOTION_FIXED_SCHEDULE_DB_ID")
@@ -197,6 +202,26 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Telegram 訊息發送失敗: {e}")
 
+def run_github_action(workflow_file, ref='main'):
+    token = os.getenv('GITHUB_TOKEN')
+    repo = os.getenv('GITHUB_REPOSITORY')
+    if not token or not repo:
+        return 'Missing GITHUB_TOKEN or GITHUB_REPOSITORY env vars.'
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow_file}/dispatches"
+    payload = {
+        'ref': ref
+    }
+    headers = {
+        'Authorization': f'token {token}',
+        'Accept': 'application/vnd.github.v3+json'
+    }
+    try:
+        res = requests.post(url, json=payload, headers=headers)
+        res.raise_for_status()
+        return f'Success (status {res.status_code})'
+    except Exception as e:
+        return f'Error: {e}'
+
 def get_telegram_file_url(file_id):
     if not TELEGRAM_BOT_TOKEN:
         return None
@@ -342,7 +367,26 @@ def process_telegram_commands(today_dt):
         text = text.strip()
         if not text:
             continue
+        # Handle manual refresh command
+        if text.startswith('/refresh_holidays'):
+            holiday_utils.refresh_cache_sync()
+            send_telegram_message('Holiday cache refreshed.')
+            continue
+        # Handle GitHub Action trigger command (secure)
+        if text.startswith('/github_action') or text.startswith('/run_github_action'):
+            parts = text.split()
+            workflow = parts[1] if len(parts) > 1 else None
+            ref = parts[2] if len(parts) > 2 else 'main'
+            if workflow and workflow.endswith('.yml') and '..' not in workflow and '/' not in workflow:
+                result = run_github_action(workflow, ref)
+                send_telegram_message(f'GitHub Action {workflow} triggered on ref {ref}: {result}')
+            else:
+                send_telegram_message('Invalid workflow filename. Use <name>.yml')
+            continue
             
+        # Extract optional time (HH:MM) from the command text
+        time_match = re.search(r"(\d{1,2}:\d{2})", text)
+        time_str = time_match.group(1) if time_match else None
         cmd_type = None
         if text.startswith("@hw"):
             cmd_type = "hw"
@@ -350,8 +394,27 @@ def process_telegram_commands(today_dt):
             cmd_type = "finish"
         elif text.startswith("@act"):
             cmd_type = "act"
-            
-        if not cmd_type:
+        else:
+            # Generic entry handling (no prefix)
+            from utils import extract_date_time, clean_title
+            raw_text = text
+            dt_info = extract_date_time(raw_text)
+            title = clean_title(raw_text)
+            iso_dt = None
+            if 'date' in dt_info:
+                if 'time' in dt_info:
+                    iso_dt = f"{dt_info['date']}T{dt_info['time']}:00"
+                else:
+                    iso_dt = dt_info['date']
+            properties = {
+                "名稱": {"title": [{"text": {"content": title}}]},
+                "類型": {"select": {"name": "其他"}},
+                "日期時間": {"date": {"start": iso_dt}} if iso_dt else {},
+                "來源": {"select": {"name": "文字"}},
+                "原始訊息": {"rich_text": [{"text": {"content": raw_text}}]}
+            }
+            create_page(TODO_ACTIVITIES_DB_ID, properties)
+            send_telegram_message(f"已新增通用待辦：{title}")
             continue
             
         print(f"收到指令: {text}")
@@ -377,11 +440,18 @@ def process_telegram_commands(today_dt):
 
         try:
             if cmd_type == "hw":
+                # Extract optional time at end of command
+                time_match = None
+                if text.strip().endswith(')') is False:
+                    import re
+                    time_match = re.search(r"(\d{1,2}:\d{2})$", text.strip())
+                time_str = time_match.group(1) if time_match else None
                 cmd_data = parse_hw_command(text, today_str)
                 if cmd_data:
-                    name = cmd_data["name"]
-                    subject = cmd_data["subject"]
-                    due_date = cmd_data["due_date"]
+                    name = cmd_data["name"].strip()
+                    subject = cmd_data["subject"].strip()
+                    due_date = cmd_data["due_date"].strip()
+                    time_str = None
                     
                     if (name == "#" or subject == "#" or due_date == "#") and file_bytes:
                         try:
@@ -398,20 +468,19 @@ def process_telegram_commands(today_dt):
                         if name == "#": name = "未命名事項"
                         if subject == "#": subject = "無"
                         if due_date == "#": due_date = today_str
-                        
+                    
                     properties = {
                         "名稱": {"title": [{"text": {"content": name}}]},
                         "類型": {"select": {"name": "作業"}},
-                        "截止或考試日期": {"date": {"start": due_date}},
+                        "日期時間": {"date": {"start": iso_datetime if time_str else due_date}},
                         "相關科目": {"rich_text": [{"text": {"content": subject}}]},
                         "總頁數/題數": {"number": 1},
                         "已完成頁數/題數": {"number": 0}
                     }
                     if file_url:
                         properties["照片上傳"] = {"files": [{"name": "Telegram Photo", "type": "external", "external": {"url": file_url}}]}
-                        
                     create_page(TODO_ACTIVITIES_DB_ID, properties)
-                    send_telegram_message(f"已成功新增待辦：{name} (科目: {subject}, 截止: {due_date})")
+                    send_telegram_message(f"已成功新增待辦：{name} (科目: {subject}, 截止: {due_date}, 時間: {time_str if time_str else '無'} )")
 
             elif cmd_type == "finish":
                 cmd_data = parse_finish_command(text)
@@ -468,7 +537,7 @@ def process_telegram_commands(today_dt):
                                 properties = {
                                     "活動名稱": {"title": [{"text": {"content": act_name}}]},
                                     "類型": {"select": {"name": act_type}},
-                                    "日期": {"date": {"start": act_date}},
+                                    "日期時間": {"date": {"start": act_date}},
                                     "備註": {"rich_text": [{"text": {"content": act_note}}]}
                                 }
                                 if file_url:
@@ -481,7 +550,7 @@ def process_telegram_commands(today_dt):
                                     new_row_properties = {
                                         "活動名稱": {"title": [{"text": {"content": event.get("name", "未命名活動")}}]},
                                         "類型": {"select": {"name": event.get("type", "其他")}},
-                                        "日期": {"date": {"start": event.get("date", today_str)}},
+                                        "日期時間": {"date": {"start": event.get("date", today_str)}},
                                         "備註": {"rich_text": [{"text": {"content": f"由 {act_name} 簡章自動生成\n---\n系統提取資訊：{event.get('note', '')}"}}]}
                                     }
                                     create_page(ACTIVITIES_DB_ID, new_row_properties)

@@ -66,12 +66,14 @@ def main():
             "properties": {
                 "名稱": {"title": {}},
                 "類型": {"select": {"options": [{"name": "作業"}, {"name": "小考"}, {"name": "段考"}, {"name": "回條"}, {"name": "報名表"}]}},
-                "截止或考試日期": {"date": {}},
-                "相關科目": {"rich_text": {}},
-                "總頁數/題數": {"number": {"format": "number"}},
-                "已完成頁數/題數": {"number": {"format": "number"}},
-                "實際耗時": {"number": {"format": "number"}},
-                "照片上傳": {"files": {}}
+                                    "日期時間": {"date": {}},
+                    "相關科目": {"rich_text": {}},
+                    "總頁數/題數": {"number": {"format": "number"}},
+                    "已完成頁數/題數": {"number": {"format": "number"}},
+                    "實際耗時": {"number": {"format": "number"}},
+                    "照片上傳": {"files": {}},
+                    "來源": {"select": {"options": [{"name": "文字"}, {"name": "照片"}]}},
+                    "原始訊息": {"rich_text": {}}
             }
         },
         "NOTION_ACTIVITIES_DB_ID": {
