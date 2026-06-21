@@ -219,13 +219,13 @@ def mock_delete_page(page_id):
     print(f"[Notion Mock API] 已刪除/封存 Page: {page_id}")
     return {}
 
-def mock_analyze_activity_brochure(image_url):
-    print(f"[Gemini Mock API] 辨識活動簡章 {image_url[:40]}...")
+def mock_analyze_activity_brochure(image_url, user_instruction=""):
+    print(f"[Gemini Mock API] 辨識活動簡章 {image_url[:40]}...，特別指令: {user_instruction}")
     return {
         "name": "2026 青年AI科學夏令營",
         "type": "營隊",
         "date": "2026-06-22",
-        "note": "時間：09:00-17:00，地點：台大，費用：免費"
+        "note": f"時間：09:00-17:00，地點：台大，費用：免費 (指令：{user_instruction})" if user_instruction else "時間：09:00-17:00，地點：台大，費用：免費"
     }
 
 def mock_analyze_receipt(image_url):

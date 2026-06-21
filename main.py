@@ -281,7 +281,7 @@ def analyze_todo_photo(image_url, today_str):
     ], generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text.strip())
 
-def analyze_activity_brochure(image_url):
+def analyze_activity_brochure(image_url, user_instruction=""):
     print(f"開始分析活動簡章照片: {image_url[:60]}...")
     resp = requests.get(image_url)
     resp.raise_for_status()
@@ -294,7 +294,11 @@ def analyze_activity_brochure(image_url):
     2. type (類型，必須是以下選項之一："講座"、"營隊"、"比賽"、"志工"、"休閒"、"其他")
     3. date (活動日期，格式為 YYYY-MM-DD，若有範圍請填寫開始日期)
     4. note (簡短備註，提取時間、地點、費用或重要資訊，50字以內)
-
+    """
+    if user_instruction:
+        prompt += f"\n\n請特別注意！使用者給出了以下特定提取指令：\n\"{user_instruction}\"\n請特別依據此指定指令，在簡章中找出對應的活動日期（填入 date 欄位），並將細節摘要填入 note 欄位。"
+        
+    prompt += """
     請僅返回以下 JSON 格式，不要包含 any markdown 標記：
     {
       "name": "活動名稱",
@@ -404,12 +408,24 @@ def run_mode_a(today_dt):
                 img_url = get_first_file_url(row, "簡章上傳")
                 if img_url:
                     try:
-                        res_data = analyze_activity_brochure(img_url)
+                        original_note = get_rich_text(row, "備註")
+                        clean_user_note = original_note.split("\n---\n系統提取資訊：")[0].strip()
+                        res_data = analyze_activity_brochure(img_url, clean_user_note)
+                        
+                        extracted_note = res_data.get("note", "")
+                        if extracted_note:
+                            if clean_user_note:
+                                combined_note = f"{clean_user_note}\n---\n系統提取資訊：{extracted_note}"
+                            else:
+                                combined_note = extracted_note
+                        else:
+                            combined_note = clean_user_note
+
                         update_properties = {
                             "活動名稱": {"title": [{"text": {"content": get_title(row, "活動名稱") or res_data.get("name", "未命名活動")}}]},
                             "類型": {"select": {"name": get_select(row, "類型") or res_data.get("type", "其他")}},
                             "日期": {"date": {"start": get_date(row, "日期") or res_data.get("date", today_str)}},
-                            "備註": {"rich_text": [{"text": {"content": get_rich_text(row, "備註") or res_data.get("note", "")}}]}
+                            "備註": {"rich_text": [{"text": {"content": combined_note}}]}
                         }
                         update_page(row["id"], update_properties)
                         print(f"已回填活動: {res_data.get('name')}")
