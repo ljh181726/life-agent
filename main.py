@@ -1,0 +1,942 @@
+import os
+import sys
+import requests
+import json
+import io
+import pytz
+from datetime import datetime, timedelta, date
+from PIL import Image
+import google.generativeai as genai
+
+# 解決 Windows 控制台編碼問題
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
+# 嘗試自本地的 .env 檔案載入環境變數
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(env_path):
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                os.environ[key.strip()] = val.strip()
+
+# 讀取環境變數
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+# Notion Database IDs
+FIXED_SCHEDULE_DB_ID = os.environ.get("NOTION_FIXED_SCHEDULE_DB_ID")
+TODO_ACTIVITIES_DB_ID = os.environ.get("NOTION_TODO_ACTIVITIES_DB_ID")
+BOOK_TRACKER_DB_ID = os.environ.get("NOTION_BOOK_TRACKER_DB_ID")
+LEDGER_DB_ID = os.environ.get("NOTION_LEDGER_DB_ID")
+WEEKLY_CALENDAR_DB_ID = os.environ.get("NOTION_WEEKLY_CALENDAR_DB_ID")
+
+# Notion API Headers
+HEADERS = {
+    "Authorization": f"Bearer {NOTION_TOKEN}",
+    "Notion-Version": "2022-06-28",
+    "Content-Type": "application/json"
+}
+
+# 預估時間基準值 (分鐘)
+DEFAULT_DURATION = {
+    "作業": 45,
+    "小考": 60,
+    "段考": 120,
+    "回條": 10,
+    "報名表": 15,
+    "活動": 90
+}
+
+# 初始化 Gemini API
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# ==================== Notion API 輔助函式 ====================
+
+def query_database_all(database_id, filter_payload=None):
+    results = []
+    has_more = True
+    next_cursor = None
+    url = f"https://api.notion.com/v1/databases/{database_id}/query"
+    
+    while has_more:
+        payload = filter_payload.copy() if filter_payload else {}
+        if next_cursor:
+            payload["start_cursor"] = next_cursor
+            
+        res = requests.post(url, headers=HEADERS, json=payload)
+        res.raise_for_status()
+        data = res.json()
+        results.extend(data.get("results", []))
+        has_more = data.get("has_more", False)
+        next_cursor = data.get("next_cursor")
+        
+    return results
+
+def create_page(database_id, properties):
+    url = "https://api.notion.com/v1/pages"
+    data = {
+        "parent": {"database_id": database_id},
+        "properties": properties
+    }
+    res = requests.post(url, headers=HEADERS, json=data)
+    res.raise_for_status()
+    return res.json()
+
+def update_page(page_id, properties):
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    data = {
+        "properties": properties
+    }
+    res = requests.patch(url, headers=HEADERS, json=data)
+    res.raise_for_status()
+    return res.json()
+
+def delete_page(page_id):
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    data = {"archived": True}
+    res = requests.patch(url, headers=HEADERS, json=data)
+    res.raise_for_status()
+    return res.json()
+
+# ==================== Notion 欄位解析輔助函式 ====================
+
+def get_title(page, property_name):
+    prop = page.get("properties", {}).get(property_name, {})
+    title_list = prop.get("title", [])
+    if title_list:
+        return title_list[0].get("text", {}).get("content", "")
+    return ""
+
+def get_rich_text(page, property_name):
+    prop = page.get("properties", {}).get(property_name, {})
+    text_list = prop.get("rich_text", [])
+    if text_list:
+        return text_list[0].get("text", {}).get("content", "")
+    return ""
+
+def get_select(page, property_name):
+    prop = page.get("properties", {}).get(property_name, {})
+    select_obj = prop.get("select")
+    if select_obj:
+        return select_obj.get("name")
+    return None
+
+def get_number(page, property_name):
+    return page.get("properties", {}).get(property_name, {}).get("number")
+
+def get_checkbox(page, property_name):
+    return page.get("properties", {}).get(property_name, {}).get("checkbox", False)
+
+def get_date(page, property_name):
+    prop = page.get("properties", {}).get(property_name, {})
+    date_obj = prop.get("date")
+    if date_obj:
+        return date_obj.get("start")
+    return None
+
+def get_first_file_url(page, property_name):
+    prop = page.get("properties", {}).get(property_name, {})
+    files = prop.get("files", [])
+    if not files:
+        return None
+    first_file = files[0]
+    if first_file.get("type") == "file":
+        return first_file.get("file", {}).get("url")
+    elif first_file.get("type") == "external":
+        return first_file.get("external", {}).get("url")
+    return None
+
+# ==================== Telegram Bot ====================
+
+def send_telegram_message(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未設定，無法發送 Telegram 通知。")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+    res = requests.post(url, json=payload)
+    res.raise_for_status()
+    print("Telegram 訊息發送成功。")
+
+# ==================== 寒暑假判定 ====================
+
+def is_vacation(check_date):
+    m, d = check_date.month, check_date.day
+    if m in [7, 8]:
+        return True
+    if m == 1 and d >= 21:
+        return True
+    if m == 2 and d <= 10:
+        return True
+    return False
+
+# ==================== 視覺辨識 (Gemini API) ====================
+
+def analyze_receipt(image_url):
+    print(f"開始分析發票照片: {image_url[:60]}...")
+    resp = requests.get(image_url)
+    resp.raise_for_status()
+    img = Image.open(io.BytesIO(resp.content))
+    
+    prompt = """
+    請幫我分析這張發票或收據照片，提取以下欄位：
+    1. item_name (發票中的主要消費項目或商店名稱，例如 "麥當勞" 或 "7-11 飲料"，請使用簡短的繁體中文)
+    2. amount (消費總金額，必須是整數數字，如果有多個金額，請選取最終付款的總金額)
+    3. category (分類，必須是以下四個選項之一："飲食"、"交通"、"娛樂"、"學習"，請根據消費內容精準推理分類，例如買書為"學習"，吃晚餐為"飲食"，搭火車為"交通"，買遊戲為"娛樂")
+
+    請僅返回以下 JSON 格式，不要包含任何 markdown 標記（如 ```json 等）：
+    {
+      "item_name": "項目名稱",
+      "amount": 100,
+      "category": "飲食"
+    }
+    """
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    response = model.generate_content([img, prompt], generation_config={"response_mime_type": "application/json"})
+    return json.loads(response.text.strip())
+
+def analyze_todo_photo(image_url, today_str):
+    print(f"開始分析聯絡簿/考卷/回條照片: {image_url[:60]}...")
+    resp = requests.get(image_url)
+    resp.raise_for_status()
+    img = Image.open(io.BytesIO(resp.content))
+    
+    prompt = f"""
+    請幫我分析這張聯絡簿、考卷或回條照片，提取出重要的待辦事項、小考、段考、回條或報名表資訊：
+    1. name (事項描述或名稱，例如 "數學課本 P.10-P.12 習題"、"英文單字 L3 小考"、"家長同意書回條"，請用繁體中文)
+    2. type (類型，必須是以下選項之一："作業"、"小考"、"段考"、"回條"、"報名表"、"活動")
+    3. due_date (截止或考試日期，格式為 YYYY-MM-DD。如果聯絡簿上寫的是明天或特定星期，請結合今天日期 {today_str} 來推理出正確的日期)
+    4. subject (相關科目，例如 "數學" "英文" "國文" "物理" "化學"，若無特定科目則填 "無")
+
+    請僅返回以下 JSON 格式，不要包含 any markdown 標記：
+    {
+      "name": "事項名稱",
+      "type": "作業",
+      "due_date": "2026-06-21",
+      "subject": "數學"
+    }
+    """
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    response = model.generate_content([img, prompt], generation_config={"response_mime_type": "application/json"})
+    return json.loads(response.text.strip())
+
+# ==================== 核心邏輯 A：下午 5:00 執行 ====================
+
+def run_mode_a(today_dt):
+    print("【執行時段 A】記帳統計 + 視覺辨識 + LINE 書包精準檢查通知")
+    today_str = today_dt.strftime("%Y-%m-%d")
+    tomorrow_dt = today_dt + timedelta(days=1)
+    tomorrow_str = tomorrow_dt.strftime("%Y-%m-%d")
+    tomorrow_w = tomorrow_dt.isoweekday()  # 1-7
+    
+    # 1. 圖片多模態辨識與 Notion 自動填回
+    # 1.1 記帳本照片處理
+    ledger_filter = {
+        "filter": {
+            "and": [
+                {"property": "收據照片", "files": {"is_not_empty": True}},
+                {"property": "金額", "number": {"is_empty": True}}
+            ]
+        }
+    }
+    unprocessed_ledgers = query_database_all(LEDGER_DB_ID, ledger_filter)
+    for row in unprocessed_ledgers:
+        img_url = get_first_file_url(row, "收據照片")
+        if img_url:
+            try:
+                res_data = analyze_receipt(img_url)
+                update_properties = {
+                    "項目名稱": {"title": [{"text": {"content": res_data.get("item_name", "未分類消費")}}]},
+                    "金額": {"number": res_data.get("amount", 0)},
+                    "分類": {"select": {"name": res_data.get("category", "飲食")}}
+                }
+                update_page(row["id"], update_properties)
+                print(f"已回填記帳: {res_data.get('item_name')} = {res_data.get('amount')}元")
+            except Exception as e:
+                print(f"處理記帳照片失敗: {e}")
+                
+    # 1.2 待辦與活動照片處理
+    todo_filter = {
+        "filter": {
+            "and": [
+                {"property": "照片上傳", "files": {"is_not_empty": True}},
+                {
+                    "or": [
+                        {"property": "相關科目", "rich_text": {"is_empty": True}},
+                        {"property": "名稱", "title": {"is_empty": True}}
+                    ]
+                }
+            ]
+        }
+    }
+    unprocessed_todos = query_database_all(TODO_ACTIVITIES_DB_ID, todo_filter)
+    for row in unprocessed_todos:
+        img_url = get_first_file_url(row, "照片上傳")
+        if img_url:
+            try:
+                res_data = analyze_todo_photo(img_url, today_str)
+                update_properties = {
+                    "名稱": {"title": [{"text": {"content": res_data.get("name", "未命名事項")}}]},
+                    "類型": {"select": {"name": res_data.get("type", "作業")}},
+                    "截止或考試日期": {"date": {"start": res_data.get("due_date", today_str)}},
+                    "相關科目": {"rich_text": [{"text": {"content": res_data.get("subject", "無")}}]}
+                }
+                update_page(row["id"], update_properties)
+                print(f"已回填待辦: {res_data.get('name')}，相關科目: {res_data.get('subject')}")
+            except Exception as e:
+                print(f"處理待辦照片失敗: {e}")
+
+    # 2. 書包物品精準檢查
+    # 2.1 撈取明天所需物品與科目
+    tomorrow_vacation = is_vacation(tomorrow_dt)
+    tomorrow_vacation_type = "暑假" if tomorrow_vacation else "學期中"
+    
+    # 撈取明天課表
+    schedule_filter = {
+        "filter": {
+            "and": [
+                {"property": "星期", "number": {"equals": tomorrow_w}},
+                {"property": "作息類型", "select": {"equals": tomorrow_vacation_type}}
+            ]
+        }
+    }
+    tomorrow_schedules = query_database_all(FIXED_SCHEDULE_DB_ID, schedule_filter)
+    tomorrow_subjects = {get_title(s, "科目名稱") for s in tomorrow_schedules if get_title(s, "科目名稱")}
+    
+    # 撈取明天截止或明天要考試的待辦
+    todo_tomorrow_filter = {
+        "filter": {
+            "and": [
+                {"property": "截止或考試日期", "date": {"equals": tomorrow_str}}
+            ]
+        }
+    }
+    tomorrow_todos = query_database_all(TODO_ACTIVITIES_DB_ID, todo_tomorrow_filter)
+    
+    # 建立明天要帶去學校的物品清單 (無 emoji 標記)
+    tomorrow_required_items = {} # {物品/科目: 標籤}
+    
+    # 固定課表需要的科目為一般重要
+    for sub in tomorrow_subjects:
+        tomorrow_required_items[sub] = "課堂課本"
+        
+    for t in tomorrow_todos:
+        sub = get_rich_text(t, "相關科目")
+        t_type = get_select(t, "類型")
+        t_name = get_title(t, "名稱")
+        
+        label = "明天作業"
+        if t_type in ["回條", "報名表"]:
+            label = "重要回條"
+        elif t_type in ["小考", "段考"]:
+            label = "考試科目"
+            
+        if sub and sub.lower() != "無":
+            tomorrow_required_items[sub] = label
+        else:
+            tomorrow_required_items[t_name] = label
+
+    # 2.2 預覽今晚至未來三天內讀書/作業所需之課本 (今天起 3 天內，即 today 到 today + 2 截止且未完成的任務科目)
+    preview_end_dt = today_dt + timedelta(days=2)
+    preview_end_str = preview_end_dt.strftime("%Y-%m-%d")
+    
+    study_todo_filter = {
+        "filter": {
+            "and": [
+                {"property": "截止或考試日期", "date": {"on_or_after": today_str}},
+                {"property": "截止或考試日期", "date": {"on_or_before": preview_end_str}},
+                {"property": "完成度", "number": {"less_than": 100}}
+            ]
+        }
+    }
+    study_todos = query_database_all(TODO_ACTIVITIES_DB_ID, study_todo_filter)
+    future_study_subjects = {} # {科目: 標籤}
+    for t in study_todos:
+        sub = get_rich_text(t, "相關科目")
+        if sub and sub.lower() != "無":
+            t_type = get_select(t, "類型")
+            t_name = get_title(t, "名稱")
+            lbl = "功課複習"
+            if t_type in ["小考", "段考"]:
+                lbl = "衝刺準備"
+            future_study_subjects[sub] = f"{lbl} ({t_name[:12]})"
+
+    # 2.3 讀取教科書位置追蹤庫
+    tracker_results = query_database_all(BOOK_TRACKER_DB_ID)
+    location_tracker = {} # {物品名稱: (目前位置, page_id)}
+    for r in tracker_results:
+        name = get_title(r, "科目/物品名稱")
+        loc = get_select(r, "目前位置")
+        if name:
+            location_tracker[name] = (loc, r["id"])
+
+    # 2.4 計算明天出門要帶去的物品 (狀態在學校 -> 忽略；狀態在家裡 -> 要帶，並更新為在學校)
+    bring_to_school = [] # list of tuples: (item, label)
+    for item, label in tomorrow_required_items.items():
+        if item in location_tracker:
+            loc, page_id = location_tracker[item]
+            if loc == "在家裡":
+                bring_to_school.append((item, label))
+                update_page(page_id, {"目前位置": {"select": {"name": "在學校"}}})
+        else:
+            # 追蹤庫中沒有的物品，預設新增且預設在學校 (因為判定要帶去了)
+            bring_to_school.append((item, label))
+            create_page(BOOK_TRACKER_DB_ID, {
+                "科目/物品名稱": {"title": [{"text": {"content": item}}]},
+                "目前位置": {"select": {"name": "在學校"}}
+            })
+
+    # 2.5 計算今天放學要帶回的物品 (狀態在家裡 -> 忽略；狀態在學校 -> 要帶回，並更新為在家裡)
+    take_home = [] # list of tuples: (item, label)
+    for item, label in future_study_subjects.items():
+        if item in location_tracker:
+            loc, page_id = location_tracker[item]
+            if loc == "在學校":
+                take_home.append((item, label))
+                update_page(page_id, {"Currently_At": {"select": {"name": "在家裡"}}})
+                update_page(page_id, {"目前位置": {"select": {"name": "在家裡"}}})
+        else:
+            # 預防性新增，假設判定要帶回，狀態更新為在家裡
+            take_home.append((item, label))
+            create_page(BOOK_TRACKER_DB_ID, {
+                "科目/物品名稱": {"title": [{"text": {"content": item}}]},
+                "目前位置": {"select": {"name": "在家裡"}}
+            })
+
+    # 2.6 將兩個清單寫入明天 (tomorrow) Notion 行事曆的「今日攜帶清單」
+    bring_to_school_str = "\n".join([f"- {x[0]} ({x[1]})" for x in bring_to_school]) if bring_to_school else "無"
+    take_home_str = "\n".join([f"- {x[0]} ({x[1]})" for x in take_home]) if take_home else "無"
+    
+    carry_note = f"【明早出門必帶】：\n{bring_to_school_str}\n\n【放學必帶回家】：\n{take_home_str}"
+    
+    # 尋找明天是否已有備忘 Page (無 emoji 標題)
+    memo_title = "【攜帶備忘】明天出門與今日放學物品"
+    memo_filter = {
+        "filter": {
+            "and": [
+                {"property": "行程名稱", "title": {"equals": memo_title}},
+                {"property": "日期", "date": {"equals": tomorrow_str}}
+            ]
+        }
+    }
+    existing_memos = query_database_all(WEEKLY_CALENDAR_DB_ID, memo_filter)
+    if existing_memos:
+        update_page(existing_memos[0]["id"], {
+            "今日攜帶清單": {"rich_text": [{"text": {"content": carry_note}}]}
+        })
+    else:
+        create_page(WEEKLY_CALENDAR_DB_ID, {
+            "行程名稱": {"title": [{"text": {"content": memo_title}}]},
+            "日期": {"date": {"start": tomorrow_str}},
+            "行程類型": {"select": {"name": "休息"}},
+            "今日攜帶清單": {"rich_text": [{"text": {"content": carry_note}}]}
+        })
+
+    # 3. 記帳統計與 LINE 發送
+    today_ledger_filter = {
+        "filter": {
+            "and": [
+                {"property": "日期", "date": {"equals": today_str}}
+            ]
+        }
+    }
+    today_ledgers = query_database_all(LEDGER_DB_ID, today_ledger_filter)
+    total_spend = sum([get_number(x, "金額") or 0 for x in today_ledgers])
+    
+    finance_joke = "錢包非常安全，今天一毛錢都沒花！"
+    if total_spend > 0:
+        try:
+            spend_details = ", ".join([f"{get_title(x, '項目名稱')}({get_number(x, '金額')}元)" for x in today_ledgers])
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            joke_prompt = f"今天總共花了 {total_spend} 元，消費項目包括：{spend_details}。請根據這些消費內容寫一句幽默、口語化且帶有警示效果的繁體中文理財提醒，字數在 50 字以內。"
+            joke_res = model.generate_content(joke_prompt)
+            finance_joke = joke_res.text.strip()
+        except Exception as e:
+            finance_joke = f"今天花了 {total_spend} 元，記得開源節流喔！"
+
+    # 組裝 Telegram 訊息 (移除 emoji 標註)
+    telegram_msg = f"""
+【Life-Agent 傍晚通知 - 書包檢查與記帳】
+
+[明早出門必帶去學校！]
+--------------------------------
+{chr(10).join([f'  [ ] {x[0]} ({x[1]})' for x in bring_to_school]) if bring_to_school else '  [x] 沒有特別需要帶的'}
+--------------------------------
+
+[今天放學必帶回包包！]
+--------------------------------
+{chr(10).join([f'  [ ] {x[0]} ({x[1]})' for x in take_home]) if take_home else '  [x] 沒有需要特別帶回家的'}
+--------------------------------
+(帶回家的課本將供今晚與未來幾天的學習排程使用)
+
+[今日消費統計]
+- 總計花費：{total_spend} 元
+- 理財提醒：{finance_joke}
+"""
+    send_telegram_message(telegram_msg)
+
+# ==================== 核心邏輯 B：半夜 12:00 執行 ====================
+
+def run_mode_b(today_dt):
+    print("【執行時段 B】動態時間塊精確分配 + LINE 明日日程通知")
+    today_str = today_dt.strftime("%Y-%m-%d")
+    yesterday_dt = today_dt - timedelta(days=1)
+    yesterday_str = yesterday_dt.strftime("%Y-%m-%d")
+    today_w = today_dt.isoweekday() # 1-7
+    
+    # 1. 讀取昨日任務，計算時間加權修正
+    yesterday_todo_filter = {
+        "filter": {
+            "and": [
+                {"property": "截止或考試日期", "date": {"equals": yesterday_str}}
+            ]
+        }
+    }
+    yesterday_todos = query_database_all(TODO_ACTIVITIES_DB_ID, yesterday_todo_filter)
+    
+    weighted_subjects = set()
+    for t in yesterday_todos:
+        completed = get_number(t, "完成度") or 0
+        actual_time = get_number(t, "實際耗時") or 0
+        t_type = get_select(t, "類型") or "作業"
+        sub = get_rich_text(t, "相關科目")
+        
+        default_time = DEFAULT_DURATION.get(t_type, 45)
+        if completed < 100 or actual_time > default_time:
+            if sub and sub.lower() != "無":
+                weighted_subjects.add(sub)
+                print(f"昨日任務 [{get_title(t, '名稱')}] 未完成或超時，今日科目 [{sub}] 任務預估時間將乘以 1.3 倍。")
+
+    # 2. 判斷寒暑假作息
+    is_vac = is_vacation(today_dt)
+    vac_type = "暑假" if is_vac else "學期中"
+    
+    # 撈取今日固定課表
+    today_schedule_filter = {
+        "filter": {
+            "and": [
+                {"property": "星期", "number": {"equals": today_w}},
+                {"property": "作息類型", "select": {"equals": vac_type}}
+            ]
+        }
+    }
+    today_fixed_schedules = query_database_all(FIXED_SCHEDULE_DB_ID, today_schedule_filter)
+    
+    # 3. 撈取今日截止或衝刺任務 (倒數 3 天衝刺)
+    sprint_end_dt = today_dt + timedelta(days=2)
+    sprint_end_str = sprint_end_dt.strftime("%Y-%m-%d")
+    
+    sprint_filter = {
+        "filter": {
+            "and": [
+                {"property": "截止或考試日期", "date": {"on_or_after": today_str}},
+                {"property": "截止或考試日期", "date": {"on_or_before": sprint_end_str}},
+                {"property": "完成度", "number": {"less_than": 100}}
+            ]
+        }
+    }
+    sprint_todos = query_database_all(TODO_ACTIVITIES_DB_ID, sprint_filter)
+
+    # 3.2 提前複習機制 (提早 7 天為段考/報告準備，避免抱佛腳)
+    pre_study_end_dt = today_dt + timedelta(days=6)
+    pre_study_end_str = pre_study_end_dt.strftime("%Y-%m-%d")
+    
+    pre_study_filter = {
+        "filter": {
+            "and": [
+                {"property": "截止或考試日期", "date": {"on_or_after": today_str}},
+                {"property": "截止或考試日期", "date": {"on_or_before": pre_study_end_str}},
+                {"property": "完成度", "number": {"less_than": 100}}
+            ]
+        }
+    }
+    pre_study_todos = query_database_all(TODO_ACTIVITIES_DB_ID, pre_study_filter)
+    
+    # 4. 規劃今天時間日程 (Time Blocking)
+    available_blocks = []
+    if not is_vac:
+        available_blocks.append((18 * 60 + 30, 22 * 60 + 30)) # 18:30 - 22:30
+    else:
+        available_blocks.append((9 * 60, 12 * 60))    # 09:00 - 12:00
+        available_blocks.append((14 * 60, 17 * 60))   # 14:00 - 17:00
+        available_blocks.append((19 * 60, 21 * 60 + 30)) # 19:00 - 21:30
+
+    fixed_events = []
+    for s in today_fixed_schedules:
+        time_range = get_rich_text(s, "時間段")
+        name = get_title(s, "科目名稱")
+        if time_range and "-" in time_range:
+            try:
+                start_s, end_s = time_range.strip().split("-")
+                sh, sm = map(int, start_s.split(":"))
+                eh, em = map(int, end_s.split(":"))
+                fixed_events.append({
+                    "name": name,
+                    "start": sh * 60 + sm,
+                    "end": eh * 60 + em,
+                    "type": "上課"
+                })
+            except Exception as e:
+                print(f"解析課表時間段失敗 [{time_range}]: {e}")
+
+    if not is_vac and not fixed_events:
+        fixed_events.append({
+            "name": "學校上課",
+            "start": 8 * 60,
+            "end": 17 * 60,
+            "type": "上課"
+        })
+
+    # 初始化時間表：True 為可用自習，False 為佔用
+    day_minutes = [False] * 1440
+    for block_start, block_end in available_blocks:
+        for m in range(block_start, block_end):
+            day_minutes[m] = True
+            
+    for event in fixed_events:
+        for m in range(event["start"], event["end"]):
+            day_minutes[m] = False
+
+    # 準備待分配的任務
+    tasks_to_allocate = []
+    processed_todo_ids = set()
+    
+    # 4.1 倒數 3 天衝刺項目 (優先權最高)
+    for t in sprint_todos:
+        t_type = get_select(t, "類型") or "作業"
+        sub = get_rich_text(t, "相關科目") or "無"
+        name = get_title(t, "名稱")
+        processed_todo_ids.add(t["id"])
+        
+        duration = 90 if t_type in ["小考", "段考"] else (15 if t_type in ["回條", "報名表"] else DEFAULT_DURATION.get(t_type, 45))
+        if sub in weighted_subjects:
+            duration = int(duration * 1.3)
+            
+        t_name = f"衝刺：{name}"
+        t_type_calendar = "段考複習" if t_type == "段考" else ("考試準備" if t_type == "小考" else "自習寫功課")
+        
+        tasks_to_allocate.append({
+            "name": t_name,
+            "type": t_type_calendar,
+            "duration": duration,
+            "subject": sub,
+            "priority": 1
+        })
+        
+    # 4.2 提早 7 天準備機制 (段考與報告)
+    for t in pre_study_todos:
+        if t["id"] in processed_todo_ids:
+            continue
+        t_type = get_select(t, "類型") or "作業"
+        name = get_title(t, "名稱")
+        sub = get_rich_text(t, "相關科目") or "無"
+        
+        # 若是未來段考或包含「報告」的作業，提早每天排入 45 分鐘準備
+        if t_type == "段考" or (t_type == "作業" and "報告" in name):
+            processed_todo_ids.add(t["id"])
+            duration = 45
+            if sub in weighted_subjects:
+                duration = int(duration * 1.3)
+                
+            t_name = f"提早準備：{name}"
+            t_type_calendar = "段考複習" if t_type == "段考" else "自習寫功課"
+            
+            tasks_to_allocate.append({
+                "name": t_name,
+                "type": t_type_calendar,
+                "duration": duration,
+                "subject": sub,
+                "priority": 2
+            })
+
+    # 4.3 今日截止的其餘項目
+    today_todo_filter = {
+        "filter": {
+            "and": [
+                {"property": "截止或考試日期", "date": {"equals": today_str}},
+                {"property": "完成度", "number": {"less_than": 100}}
+            ]
+        }
+    }
+    today_todos = query_database_all(TODO_ACTIVITIES_DB_ID, today_todo_filter)
+    for t in today_todos:
+        if t["id"] in processed_todo_ids:
+            continue
+        t_type = get_select(t, "類型") or "作業"
+        sub = get_rich_text(t, "相關科目") or "無"
+        name = get_title(t, "名稱")
+        
+        duration = DEFAULT_DURATION.get(t_type, 45)
+        if sub in weighted_subjects:
+            duration = int(duration * 1.3)
+            
+        t_name = f"今日待辦：{name}"
+        t_type_calendar = "自習寫功課" if t_type in ["作業", "回條", "報名表"] else "考試準備"
+        
+        tasks_to_allocate.append({
+            "name": t_name,
+            "type": t_type_calendar,
+            "duration": duration,
+            "subject": sub,
+            "priority": 3
+        })
+
+    # 4.4 獲取物品位置追蹤庫，進行防遺失警報
+    tracker_results = query_database_all(BOOK_TRACKER_DB_ID)
+    location_tracker = {}
+    for r in tracker_results:
+        name = get_title(r, "科目/物品名稱")
+        loc = get_select(r, "目前位置")
+        if name:
+            location_tracker[name] = loc
+
+    # 4.5 番茄鐘式時間塊規劃：若任務時間過長，自動進行拆分與休息插入 (例如超過 50 分鐘的自修)
+    split_tasks = []
+    for task in tasks_to_allocate:
+        dur = task["duration"]
+        if dur > 50:
+            parts = []
+            while dur > 50:
+                parts.append(50)
+                dur -= 50
+            if dur > 0:
+                parts.append(dur)
+            
+            # 將長任務轉換為 多個 50 分鐘任務，並在其中夾雜 10 分鐘休息行程
+            for idx, part_dur in enumerate(parts):
+                split_tasks.append({
+                    "name": f"{task['name']} (專注 Part {idx+1})",
+                    "type": task["type"],
+                    "duration": part_dur,
+                    "subject": task["subject"],
+                    "priority": task["priority"]
+                })
+                if idx < len(parts) - 1:
+                    # 插入一個 10 分鐘的番茄鐘休息
+                    split_tasks.append({
+                        "name": "番茄鐘伸展休息",
+                        "type": "休息",
+                        "duration": 10,
+                        "subject": "無",
+                        "priority": task["priority"]
+                    })
+        else:
+            split_tasks.append(task)
+
+    planned_events = []
+    # 寫入固定上課行程
+    for event in fixed_events:
+        planned_events.append({
+            "name": event["name"],
+            "type": "上課",
+            "start": event["start"],
+            "end": event["end"],
+            "note": ""
+        })
+
+    # 分配位置輔助函式
+    def find_free_slot(duration):
+        consecutive_free = 0
+        start_idx = -1
+        for i in range(1440):
+            if day_minutes[i]:
+                if start_idx == -1:
+                    start_idx = i
+                consecutive_free += 1
+                if consecutive_free >= duration:
+                    return start_idx, start_idx + duration
+            else:
+                consecutive_free = 0
+                start_idx = -1
+        return None
+
+    unplanned_tasks = []
+    for task in split_tasks:
+        if task["name"] == "番茄鐘伸展休息":
+            # 尋找 10 分鐘空擋
+            slot = find_free_slot(10)
+            if slot:
+                start_m, end_m = slot
+                for m in range(start_m, end_m):
+                    day_minutes[m] = False
+                planned_events.append({
+                    "name": task["name"],
+                    "type": "休息",
+                    "start": start_m,
+                    "end": end_m,
+                    "note": ""
+                })
+            continue
+
+        slot = find_free_slot(task["duration"])
+        if slot:
+            start_m, end_m = slot
+            for m in range(start_m, end_m):
+                day_minutes[m] = False
+                
+            # 核對課本位置，提供警報
+            note = ""
+            sub = task["subject"]
+            if sub and sub != "無":
+                loc = location_tracker.get(sub)
+                if loc == "在學校":
+                    note = f"[警報]{sub}課本仍在學校！請找同學借閱或確認是否漏帶！"
+                    
+            planned_events.append({
+                "name": task["name"],
+                "type": task["type"],
+                "start": start_m,
+                "end": end_m,
+                "note": note
+            })
+        else:
+            unplanned_tasks.append(task)
+
+    # 填補剩餘可用自習時間為自由休息
+    rest_start = -1
+    for i in range(1440):
+        if day_minutes[i]:
+            if rest_start == -1:
+                rest_start = i
+        else:
+            if rest_start != -1:
+                planned_events.append({
+                    "name": "自由休息與放鬆",
+                    "type": "休息",
+                    "start": rest_start,
+                    "end": i,
+                    "note": ""
+                })
+                rest_start = -1
+    if rest_start != -1:
+        planned_events.append({
+            "name": "自由休息與放鬆",
+            "type": "休息",
+            "start": rest_start,
+            "end": 1440,
+            "note": ""
+        })
+
+    planned_events.sort(key=lambda x: x["start"])
+
+    # 5. 批次寫回 Notion
+    today_calendar_filter = {
+        "filter": {
+            "and": [
+                {"property": "日期", "date": {"equals": today_str}},
+                {"property": "行程名稱", "title": {"does_not_contain": "攜帶備忘"}}
+            ]
+        }
+    }
+    existing_events = query_database_all(WEEKLY_CALENDAR_DB_ID, today_calendar_filter)
+    for row in existing_events:
+        delete_page(row["id"])
+    print(f"已清除今日已存在行程共 {len(existing_events)} 筆。")
+
+    for event in planned_events:
+        sh, sm = divmod(event["start"], 60)
+        eh, em = divmod(event["end"], 60)
+        start_str = f"{sh:02d}:{sm:02d}"
+        end_str = f"{eh:02d}:{em:02d}"
+        
+        properties = {
+            "行程名稱": {"title": [{"text": {"content": event["name"]}}]},
+            "日期": {"date": {"start": today_str}},
+            "開始時間": {"rich_text": [{"text": {"content": start_str}}]},
+            "結束時間": {"rich_text": [{"text": {"content": end_str}}]},
+            "行程類型": {"select": {"name": event["type"]}},
+            "備註": {"rich_text": [{"text": {"content": event["note"]}}]}
+        }
+        create_page(WEEKLY_CALENDAR_DB_ID, properties)
+        print(f"已寫入行程: {start_str}-{end_str} [{event['type']}] {event['name']}")
+
+    # 6. Telegram 發送今日日程 (無 emoji 格式)
+    schedule_lines = []
+    warning_alerts = []
+    
+    for event in planned_events:
+        sh, sm = divmod(event["start"], 60)
+        eh, em = divmod(event["end"], 60)
+        line = f"{sh:02d}:{sm:02d} - {eh:02d}:{em:02d} | [{event['type']}] {event['name']}"
+        if event["note"]:
+            line += f"\n   注意: {event['note']}"
+            warning_alerts.append(f"● {event['name']}: {event['note']}")
+        schedule_lines.append(line)
+
+    alert_section = ""
+    if warning_alerts:
+        alert_section = "【漏帶物品與課本警報】\n" + "\n".join(warning_alerts) + "\n\n"
+
+    unplanned_msg = ""
+    if unplanned_tasks:
+        unique_unplanned = {t["name"] for t in unplanned_tasks if "番茄鐘" not in t["name"]}
+        if unique_unplanned:
+            unplanned_msg = "\n注意: 因時間不足未排入的待辦：\n" + "\n".join([f"- {t}" for t in unique_unplanned])
+
+    telegram_msg = f"""
+【Life-Agent 日程通知 - 時間管理與日程分配】
+
+{alert_section}今日時間日程表 (Time Blocking - 番茄鐘專注版)：
+--------------------------------
+{chr(10).join(schedule_lines)}
+--------------------------------
+{unplanned_msg}
+
+今日目標：專注 50 分鐘、放鬆 10 分鐘，不漏帶任何課本，穩定前進！
+"""
+    send_telegram_message(telegram_msg)
+
+# ==================== 主程式入口 ====================
+
+def main():
+    tw_tz = pytz.timezone("Asia/Taipei")
+    now = datetime.now(tw_tz)
+    
+    mode = None
+    if len(sys.argv) > 1:
+        for arg in sys.argv:
+            if arg.startswith("--mode="):
+                mode = arg.split("=")[1].upper()
+            elif arg == "--mode":
+                idx = sys.argv.index(arg)
+                if idx + 1 < len(sys.argv):
+                    mode = sys.argv[idx + 1].upper()
+
+    if not mode:
+        if 15 <= now.hour <= 20:
+            mode = "A"
+        elif now.hour >= 22 or now.hour <= 2:
+            mode = "B"
+        else:
+            mode = "A"
+
+    print(f"當前台灣時間: {now.strftime('%Y-%m-%d %H:%M:%S')}，執行模式: {mode}")
+
+    test_date_str = os.environ.get("TEST_DATE")
+    if test_date_str:
+        today_dt = datetime.strptime(test_date_str, "%Y-%m-%d").replace(tzinfo=tw_tz)
+        print(f"使用測試日期: {today_dt.strftime('%Y-%m-%d')}")
+    else:
+        today_dt = now
+
+    if mode == "A":
+        run_mode_a(today_dt)
+    elif mode == "B":
+        run_mode_b(today_dt)
+    else:
+        print(f"未知的執行模式: {mode}")
+
+if __name__ == "__main__":
+    main()

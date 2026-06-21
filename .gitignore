@@ -1,0 +1,12 @@
+# 本地環境變數祕鑰檔案
+.env
+
+# Python 快取與虛擬環境
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
