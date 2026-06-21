@@ -82,7 +82,9 @@ def main():
                 "日期": {"date": {}},
                 "類型": {"select": {"options": [{"name": "講座"}, {"name": "營隊"}, {"name": "比賽"}, {"name": "志工"}, {"name": "休閒"}, {"name": "其他"}]}},
                 "簡章上傳": {"files": {}},
-                "備註": {"rich_text": {}}
+                "備註": {"rich_text": {}},
+                "報名截止日": {"date": {}},
+                "其他日期": {"date": {}}
             }
         },
         "NOTION_BOOK_TRACKER_DB_ID": {

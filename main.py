@@ -294,9 +294,11 @@ def analyze_activity_brochure(image_url, user_instruction=""):
     2. type (類型，必須是以下選項之一："講座"、"營隊"、"比賽"、"志工"、"休閒"、"其他")
     3. date (活動日期，格式為 YYYY-MM-DD，若有範圍請填寫開始日期)
     4. note (簡短備註，提取時間、地點、費用或重要資訊，50字以內)
+    5. deadline (報名截止日，格式為 YYYY-MM-DD，若未提及請填 null)
+    6. other_date (其他日期，例如複賽日期、活動第二階段日期等，格式為 YYYY-MM-DD，若無請填 null)
     """
     if user_instruction:
-        prompt += f"\n\n請特別注意！使用者給出了以下特定提取指令：\n\"{user_instruction}\"\n請特別依據此指定指令，在簡章中找出對應的活動日期（填入 date 欄位），並將細節摘要填入 note 欄位。"
+        prompt += f"\n\n請特別注意！使用者給出了以下特定提取指令：\n\"{user_instruction}\"\n請特別依據此指定指令，在簡章中找出對應的活動日期（填入 date 欄位）、報名截止日（填入 deadline 欄位）、其他日期（填入 other_date 欄位），並將細節摘要填入 note 欄位。"
         
     prompt += """
     請僅返回以下 JSON 格式，不要包含 any markdown 標記：
@@ -304,7 +306,9 @@ def analyze_activity_brochure(image_url, user_instruction=""):
       "name": "活動名稱",
       "type": "講座",
       "date": "2026-07-01",
-      "note": "時間：10:00，地點：台大，費用：免費"
+      "note": "時間：10:00，地點：台大，費用：免費",
+      "deadline": "2026-06-10",
+      "other_date": "2026-08-01"
     }
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
@@ -396,7 +400,9 @@ def run_mode_a(today_dt):
                     {
                         "or": [
                             {"property": "活動名稱", "title": {"is_empty": True}},
-                            {"property": "日期", "date": {"is_empty": True}}
+                            {"property": "日期", "date": {"is_empty": True}},
+                            {"property": "報名截止日", "date": {"is_empty": True}},
+                            {"property": "其他日期", "date": {"is_empty": True}}
                         ]
                     }
                 ]
@@ -427,6 +433,15 @@ def run_mode_a(today_dt):
                             "日期": {"date": {"start": get_date(row, "日期") or res_data.get("date", today_str)}},
                             "備註": {"rich_text": [{"text": {"content": combined_note}}]}
                         }
+                        
+                        deadline_val = get_date(row, "報名截止日") or res_data.get("deadline")
+                        if deadline_val:
+                            update_properties["報名截止日"] = {"date": {"start": deadline_val}}
+                            
+                        other_date_val = get_date(row, "其他日期") or res_data.get("other_date")
+                        if other_date_val:
+                            update_properties["其他日期"] = {"date": {"start": other_date_val}}
+                            
                         update_page(row["id"], update_properties)
                         print(f"已回填活動: {res_data.get('name')}")
                     except Exception as e:
