@@ -167,6 +167,17 @@ def get_bot_user_id():
         print(f"取得 Bot User ID 失敗: {e}")
     return None
 
+def is_task_completed(page):
+    completed_val = get_number(page, "已完成頁數/題數")
+    total_val = get_number(page, "總頁數/題數")
+    
+    if completed_val is None:
+        completed_val = 0
+    if total_val is None:
+        total_val = 1
+        
+    return completed_val >= total_val
+
 # ==================== Telegram Bot ====================
 
 def send_telegram_message(message):
@@ -302,8 +313,11 @@ def run_mode_a(today_dt):
                 update_properties = {
                     "名稱": {"title": [{"text": {"content": res_data.get("name", "未命名事項")}}]},
                     "類型": {"select": {"name": res_data.get("type", "作業")}},
+                    "開始日期": {"date": {"start": today_str}},
                     "截止或考試日期": {"date": {"start": res_data.get("due_date", today_str)}},
-                    "相關科目": {"rich_text": [{"text": {"content": res_data.get("subject", "無")}}]}
+                    "相關科目": {"rich_text": [{"text": {"content": res_data.get("subject", "無")}}]},
+                    "總頁數/題數": {"number": 1},
+                    "已完成頁數/題數": {"number": 0}
                 }
                 update_page(row["id"], update_properties)
                 print(f"已回填待辦: {res_data.get('name')}，相關科目: {res_data.get('subject')}")
@@ -368,12 +382,12 @@ def run_mode_a(today_dt):
         "filter": {
             "and": [
                 {"property": "截止或考試日期", "date": {"on_or_after": today_str}},
-                {"property": "截止或考試日期", "date": {"on_or_before": preview_end_str}},
-                {"property": "完成度", "number": {"less_than": 100}}
+                {"property": "截止或考試日期", "date": {"on_or_before": preview_end_str}}
             ]
         }
     }
-    study_todos = query_database_all(TODO_ACTIVITIES_DB_ID, study_todo_filter)
+    raw_study_todos = query_database_all(TODO_ACTIVITIES_DB_ID, study_todo_filter)
+    study_todos = [t for t in raw_study_todos if not is_task_completed(t)]
     future_study_subjects = {} # {科目: 標籤}
     for t in study_todos:
         sub = get_rich_text(t, "相關科目")
@@ -554,12 +568,12 @@ def run_mode_b(today_dt):
         "filter": {
             "and": [
                 {"property": "截止或考試日期", "date": {"on_or_after": today_str}},
-                {"property": "截止或考試日期", "date": {"on_or_before": sprint_end_str}},
-                {"property": "完成度", "number": {"less_than": 100}}
+                {"property": "截止或考試日期", "date": {"on_or_before": sprint_end_str}}
             ]
         }
     }
-    sprint_todos = query_database_all(TODO_ACTIVITIES_DB_ID, sprint_filter)
+    raw_sprint_todos = query_database_all(TODO_ACTIVITIES_DB_ID, sprint_filter)
+    sprint_todos = [t for t in raw_sprint_todos if not is_task_completed(t)]
 
     # 3.2 提前複習機制 (提早 7 天為段考/報告準備，避免抱佛腳)
     pre_study_end_dt = today_dt + timedelta(days=6)
@@ -569,12 +583,12 @@ def run_mode_b(today_dt):
         "filter": {
             "and": [
                 {"property": "截止或考試日期", "date": {"on_or_after": today_str}},
-                {"property": "截止或考試日期", "date": {"on_or_before": pre_study_end_str}},
-                {"property": "完成度", "number": {"less_than": 100}}
+                {"property": "截止或考試日期", "date": {"on_or_before": pre_study_end_str}}
             ]
         }
     }
-    pre_study_todos = query_database_all(TODO_ACTIVITIES_DB_ID, pre_study_filter)
+    raw_pre_study_todos = query_database_all(TODO_ACTIVITIES_DB_ID, pre_study_filter)
+    pre_study_todos = [t for t in raw_pre_study_todos if not is_task_completed(t)]
     
     # 4. 規劃今天時間日程 (Time Blocking)
     available_blocks = []
@@ -725,12 +739,12 @@ def run_mode_b(today_dt):
     today_todo_filter = {
         "filter": {
             "and": [
-                {"property": "截止或考試日期", "date": {"equals": today_str}},
-                {"property": "完成度", "number": {"less_than": 100}}
+                {"property": "截止或考試日期", "date": {"equals": today_str}}
             ]
         }
     }
-    today_todos = query_database_all(TODO_ACTIVITIES_DB_ID, today_todo_filter)
+    raw_today_todos = query_database_all(TODO_ACTIVITIES_DB_ID, today_todo_filter)
+    today_todos = [t for t in raw_today_todos if not is_task_completed(t)]
     for t in today_todos:
         if t["id"] in processed_todo_ids:
             continue

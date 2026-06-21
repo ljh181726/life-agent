@@ -33,9 +33,11 @@ mock_todo_activities = [
         "properties": {
             "名稱": {"title": [{"text": {"content": "數學 L2 習題"}}]},
             "類型": {"select": {"name": "作業"}},
+            "開始日期": {"date": {"start": "2026-06-19"}},
             "截止或考試日期": {"date": {"start": "2026-06-20"}},
             "相關科目": {"rich_text": [{"text": {"content": "數學"}}]},
-            "完成度": {"number": 50}, # 未完成
+            "總頁數/題數": {"number": 10},
+            "已完成頁數/題數": {"number": 5}, # 5/10 未完成
             "實際耗時": {"number": 60},
             "照片上傳": {"files": []}
         }
@@ -46,9 +48,11 @@ mock_todo_activities = [
         "properties": {
             "名稱": {"title": [{"text": {"content": "英文 Writing 報告"}}]},
             "類型": {"select": {"name": "作業"}},
+            "開始日期": {"date": {"start": "2026-06-20"}},
             "截止或考試日期": {"date": {"start": "2026-06-22"}},
             "相關科目": {"rich_text": [{"text": {"content": "英文"}}]},
-            "完成度": {"number": 0},
+            "總頁數/題數": {"number": 1},
+            "已完成頁數/題數": {"number": 0},
             "實際耗時": {"number": None},
             "照片上傳": {"files": []}
         }
@@ -59,9 +63,11 @@ mock_todo_activities = [
         "properties": {
             "名稱": {"title": [{"text": {"content": "家長同意書回條"}}]},
             "類型": {"select": {"name": "回條"}},
+            "開始日期": {"date": {"start": "2026-06-20"}},
             "截止或考試日期": {"date": {"start": "2026-06-22"}},
             "相關科目": {"rich_text": [{"text": {"content": "無"}}]},
-            "完成度": {"number": 0},
+            "總頁數/題數": {"number": 1},
+            "已完成頁數/題數": {"number": 0},
             "實際耗時": {"number": None},
             "照片上傳": {"files": []}
         }
@@ -72,9 +78,11 @@ mock_todo_activities = [
         "properties": {
             "名稱": {"title": [{"text": {"content": "歷史 L1-L3 段考"}}]},
             "類型": {"select": {"name": "段考"}},
+            "開始日期": {"date": {"start": "2026-06-18"}},
             "截止或考試日期": {"date": {"start": "2026-06-25"}},
             "相關科目": {"rich_text": [{"text": {"content": "歷史"}}]},
-            "完成度": {"number": 10},
+            "總頁數/題數": {"number": 1},
+            "已完成頁數/題數": {"number": 0},
             "實際耗時": {"number": None},
             "照片上傳": {"files": []}
         }
@@ -85,9 +93,11 @@ mock_todo_activities = [
         "properties": {
             "名稱": {"title": []}, # 待辨識
             "類型": {"select": None},
+            "開始日期": {"date": None},
             "截止或考試日期": {"date": None},
             "相關科目": {"rich_text": []},
-            "完成度": {"number": 0},
+            "總頁數/題數": {"number": None},
+            "已完成頁數/題數": {"number": None},
             "實際耗時": {"number": None},
             "照片上傳": {"files": [{"type": "external", "external": {"url": "https://example.com/mock_receipt.jpg"}}]}
         }
