@@ -372,17 +372,7 @@ def process_telegram_commands(today_dt):
             holiday_utils.refresh_cache_sync()
             send_telegram_message('Holiday cache refreshed.')
             continue
-        # Handle GitHub Action trigger command (secure)
-        if text.startswith('/github_action') or text.startswith('/run_github_action'):
-            parts = text.split()
-            workflow = parts[1] if len(parts) > 1 else None
-            ref = parts[2] if len(parts) > 2 else 'main'
-            if workflow and workflow.endswith('.yml') and '..' not in workflow and '/' not in workflow:
-                result = run_github_action(workflow, ref)
-                send_telegram_message(f'GitHub Action {workflow} triggered on ref {ref}: {result}')
-            else:
-                send_telegram_message('Invalid workflow filename. Use <name>.yml')
-            continue
+                # GitHub Action trigger disabled
             
         # Extract optional time (HH:MM) from the command text
         time_match = re.search(r"(\d{1,2}:\d{2})", text)
