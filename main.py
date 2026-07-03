@@ -1197,6 +1197,25 @@ def run_mode_b(today_dt):
     for s in today_fixed_schedules:
         time_range = get_rich_text(s, "時間段")
         name = get_title(s, "科目名稱")
+        
+        # 1. 暑輔日期區間限制 (2026-07-13 至 2026-08-07)
+        if name == "暑輔":
+            curr_date = today_dt.date()
+            if not (date(2026, 7, 13) <= curr_date <= date(2026, 8, 7)):
+                print(f"今日 ({curr_date}) 不在暑輔期間 (7/13 - 8/7)，跳過固定行程 暑輔。")
+                continue
+                
+        # 2. 請假/停課/休息判定
+        is_canceled = False
+        for ex in existing_events:
+            ex_title = get_title(ex, "行程名稱")
+            if name in ex_title and ("請假" in ex_title or "停課" in ex_title or "休息" in ex_title):
+                is_canceled = True
+                print(f"今日課程 [{name}] 在行事曆中被標記為 {ex_title}，已跳過固定行程。")
+                break
+        if is_canceled:
+            continue
+
         if time_range and "-" in time_range:
             try:
                 start_s, end_s = time_range.strip().split("-")
