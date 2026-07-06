@@ -871,7 +871,7 @@ def analyze_calendar_image_bytes(content, today_str):
       ]
     }}
     """
-    model = genai.GenerativeModel('gemini-1.5-pro')
+    model = genai.GenerativeModel('gemini-3.1-flash-lite')
     response = model.generate_content([
         {
             'mime_type': mime_type,
@@ -933,7 +933,7 @@ def analyze_calendar_text(text_content, today_str):
       ]
     }}
     """
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-3.1-flash-lite')
     response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text.strip())
 
@@ -1130,29 +1130,25 @@ def run_mode_a(today_dt):
         else:
             tomorrow_required_items[t_name] = label
 
-    # 2.2 預覽今晚至未來三天內讀書/作業所需之課本 (今天起 3 天內，即 today 到 today + 2 截止且未完成的任務科目)
+    # 2.2 預覽今晚至未來三天內讀書/作業所需之課本 (包含已逾期、未來3天內截止、或沒有設定截止日期的所有未完成任務科目)
     preview_end_dt = today_dt + timedelta(days=2)
     preview_end_str = preview_end_dt.strftime("%Y-%m-%d")
     
-    study_todo_filter = {
-        "filter": {
-            "and": [
-                {"property": "截止或考試日期", "date": {"on_or_before": preview_end_str}}
-            ]
-        }
-    }
-    raw_study_todos = query_database_all(TODO_ACTIVITIES_DB_ID, study_todo_filter)
+    raw_study_todos = query_database_all(TODO_ACTIVITIES_DB_ID)
     study_todos = [t for t in raw_study_todos if not is_task_completed(t)]
     future_study_subjects = {} # {科目: 標籤}
     for t in study_todos:
-        sub = get_rich_text(t, "相關科目")
-        if sub and sub.lower() != "無":
-            t_type = get_select(t, "類型")
-            t_name = get_title(t, "名稱")
-            lbl = "功課複習"
-            if t_type in ["小考", "段考"]:
-                lbl = "衝刺準備"
-            future_study_subjects[sub] = f"{lbl} ({t_name[:12]})"
+        due = get_date(t, "截止或考試日期")
+        # 篩選條件：無截止日期，或截止日期在未來3天之內(含逾期)
+        if not due or due <= preview_end_str:
+            sub = get_rich_text(t, "相關科目")
+            if sub and sub.lower() != "無":
+                t_type = get_select(t, "類型")
+                t_name = get_title(t, "名稱")
+                lbl = "功課複習"
+                if t_type in ["小考", "段考"]:
+                    lbl = "衝刺準備"
+                future_study_subjects[sub] = f"{lbl} ({t_name[:12]})"
 
     # 2.3 讀取教科書位置追蹤庫
     tracker_results = query_database_all(BOOK_TRACKER_DB_ID)
@@ -1317,33 +1313,36 @@ def run_mode_b(today_dt):
     }
     today_fixed_schedules = query_database_all(FIXED_SCHEDULE_DB_ID, today_schedule_filter)
     
-    # 3. 撈取今日截止或衝刺任務 (倒數 3 天衝刺)
+    # 3. 撈取所有未完成任務並分類
+    raw_all_todos = query_database_all(TODO_ACTIVITIES_DB_ID)
+    uncompleted_todos = [t for t in raw_all_todos if not is_task_completed(t)]
+    
     sprint_end_dt = today_dt + timedelta(days=2)
     sprint_end_str = sprint_end_dt.strftime("%Y-%m-%d")
     
-    sprint_filter = {
-        "filter": {
-            "and": [
-                {"property": "截止或考試日期", "date": {"on_or_before": sprint_end_str}}
-            ]
-        }
-    }
-    raw_sprint_todos = query_database_all(TODO_ACTIVITIES_DB_ID, sprint_filter)
-    sprint_todos = [t for t in raw_sprint_todos if not is_task_completed(t)]
-
-    # 3.2 提前複習機制 (提早 7 天為段考/報告準備，避免抱佛腳)
     pre_study_end_dt = today_dt + timedelta(days=6)
     pre_study_end_str = pre_study_end_dt.strftime("%Y-%m-%d")
     
-    pre_study_filter = {
-        "filter": {
-            "and": [
-                {"property": "截止或考試日期", "date": {"on_or_before": pre_study_end_str}}
-            ]
-        }
-    }
-    raw_pre_study_todos = query_database_all(TODO_ACTIVITIES_DB_ID, pre_study_filter)
-    pre_study_todos = [t for t in raw_pre_study_todos if not is_task_completed(t)]
+    sprint_todos = []      # 倒數 3 天衝刺、當天截止或已逾期的任務 (Priority 1)
+    pre_study_todos = []   # 提早 7 天段考/報告準備 (Priority 2)
+    today_todos = []       # 今天截止的任務 (Priority 3)
+    general_todos = []     # 其他所有未完成的任務，包括沒有截止日期的任務 (Priority 4)
+    
+    for t in uncompleted_todos:
+        due = get_date(t, "截止或考試日期")
+        if due:
+            if due <= today_str:
+                if due == today_str:
+                    today_todos.append(t)
+                sprint_todos.append(t)
+            elif due <= sprint_end_str:
+                sprint_todos.append(t)
+            elif due <= pre_study_end_str:
+                pre_study_todos.append(t)
+            else:
+                general_todos.append(t)
+        else:
+            general_todos.append(t)
     
     # 4. 規劃今天時間日程 (Time Blocking)
     available_blocks = []
@@ -1552,16 +1551,7 @@ def run_mode_b(today_dt):
                 "priority": 2
             })
 
-    # 4.3 今日截止的其餘項目
-    today_todo_filter = {
-        "filter": {
-            "and": [
-                {"property": "截止或考試日期", "date": {"equals": today_str}}
-            ]
-        }
-    }
-    raw_today_todos = query_database_all(TODO_ACTIVITIES_DB_ID, today_todo_filter)
-    today_todos = [t for t in raw_today_todos if not is_task_completed(t)]
+    # 4.3 今日截止的其餘項目 (Priority 3)
     for t in today_todos:
         if t["id"] in processed_todo_ids:
             continue
@@ -1582,6 +1572,29 @@ def run_mode_b(today_dt):
             "duration": duration,
             "subject": sub,
             "priority": 3
+        })
+
+    # 4.3.2 其他未完成項目 (Priority 4, 包含沒有設定截止日期或期限較遠的所有其餘工作)
+    for t in general_todos:
+        if t["id"] in processed_todo_ids:
+            continue
+        t_type = get_select(t, "類型") or "作業"
+        sub = get_rich_text(t, "相關科目") or "無"
+        name = get_title(t, "名稱")
+        
+        duration = DEFAULT_DURATION.get(t_type, 45)
+        if sub in weighted_subjects:
+            duration = int(duration * 1.3)
+            
+        t_name = f"待辦：{name}"
+        t_type_calendar = "自習寫功課" if t_type in ["作業", "回條", "報名表"] else "考試準備"
+        
+        tasks_to_allocate.append({
+            "name": t_name,
+            "type": t_type_calendar,
+            "duration": duration,
+            "subject": sub,
+            "priority": 4
         })
 
     # 4.4 獲取物品位置追蹤庫，進行防遺失警報
