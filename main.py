@@ -925,7 +925,6 @@ def run_mode_a(today_dt):
     study_todo_filter = {
         "filter": {
             "and": [
-                {"property": "截止或考試日期", "date": {"on_or_after": today_str}},
                 {"property": "截止或考試日期", "date": {"on_or_before": preview_end_str}}
             ]
         }
@@ -1113,7 +1112,6 @@ def run_mode_b(today_dt):
     sprint_filter = {
         "filter": {
             "and": [
-                {"property": "截止或考試日期", "date": {"on_or_after": today_str}},
                 {"property": "截止或考試日期", "date": {"on_or_before": sprint_end_str}}
             ]
         }
@@ -1128,7 +1126,6 @@ def run_mode_b(today_dt):
     pre_study_filter = {
         "filter": {
             "and": [
-                {"property": "截止或考試日期", "date": {"on_or_after": today_str}},
                 {"property": "截止或考試日期", "date": {"on_or_before": pre_study_end_str}}
             ]
         }
@@ -1167,16 +1164,33 @@ def run_mode_b(today_dt):
 
     # 分類：區分自動建立的（待清除）與使用者建立的（保留並視為固定行程）
     bot_event_ids_to_delete = []
+    today_fixed_subject_names = {get_title(s, "科目名稱") for s in today_fixed_schedules if get_title(s, "科目名稱")}
     for row in existing_events:
         created_by_id = row.get("created_by", {}).get("id")
-        if bot_user_id and created_by_id == bot_user_id:
+        name = get_title(row, "行程名稱")
+        
+        # 判斷是否為自動產生的自習/休息塊或重複性課表項目
+        is_bot_generated_block = (
+            name in ["自由休息與放鬆", "番茄鐘伸展休息"] or
+            name.startswith("衝刺：") or
+            name.startswith("提早準備：") or
+            name.startswith("今日待辦：") or
+            name in today_fixed_subject_names
+        )
+        
+        if bot_user_id and created_by_id == bot_user_id and is_bot_generated_block:
             # 這是機器人自動生成的，需要刪除重建
             bot_event_ids_to_delete.append(row["id"])
         else:
-            # 這是使用者手動加入的，保留，並加到 fixed_events
+            # 這是使用者手動加入的，或是腳本匯入的一次性行程/請假，保留
+            # 如果是請假/停課/休息，不作為忙碌區塊（Fixed Busy Blocks）避開，以便釋放時間進行安排
+            is_cancellation = ("請假" in name or "停課" in name or "休息!" in name or "(休息!)" in name)
+            if is_cancellation:
+                print(f"偵測到請假/停課標記行程 [{name}]，不將其視為忙碌區塊以釋放時間。")
+                continue
+                
             start_time_str = get_rich_text(row, "開始時間")
             end_time_str = get_rich_text(row, "結束時間")
-            name = get_title(row, "行程名稱")
             if start_time_str and end_time_str:
                 try:
                     start_time_str = start_time_str.strip()
@@ -1191,9 +1205,9 @@ def run_mode_b(today_dt):
                             "type": get_select(row, "行程類型") or "上課",
                             "is_user_event": True
                         })
-                        print(f"偵測到使用者手動排程，已視為固定行程: {start_time_str}-{end_time_str} {name}")
+                        print(f"偵測到保留行程/一次性事件，已視為固定行程: {start_time_str}-{end_time_str} {name}")
                 except Exception as e:
-                    print(f"解析手動行程時間失敗 [{name}]: {e}")
+                    print(f"解析保留行程時間失敗 [{name}]: {e}")
     for s in today_fixed_schedules:
         time_range = get_rich_text(s, "時間段")
         name = get_title(s, "科目名稱")
