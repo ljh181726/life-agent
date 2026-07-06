@@ -387,26 +387,128 @@ def process_telegram_commands(today_dt):
         elif text.startswith("@calendar") or text.startswith("@schedule"):
             cmd_type = "calendar"
         else:
-            # Generic entry handling (no prefix)
-            from utils import extract_date_time, clean_title
-            raw_text = text
-            dt_info = extract_date_time(raw_text)
-            title = clean_title(raw_text)
-            iso_dt = None
-            if 'date' in dt_info:
-                if 'time' in dt_info:
-                    iso_dt = f"{dt_info['date']}T{dt_info['time']}:00"
+            # Generic entry handling: Call Gemini to route and parse the message!
+            try:
+                res_route = route_and_parse_natural_text(text, today_str)
+                action = res_route.get("action")
+                data = res_route.get("data", {})
+                
+                if action == "add_todo":
+                    name = data.get("name")
+                    subject = data.get("subject") or "無"
+                    due_date = data.get("due_date")
+                    t_type = data.get("type") or "作業"
+                    
+                    if not name or name == "#":
+                        name = "未命名待辦"
+                    
+                    properties = {
+                        "名稱": {"title": [{"text": {"content": name}}]},
+                        "類型": {"select": {"name": t_type}},
+                        "相關科目": {"rich_text": [{"text": {"content": subject}}]},
+                        "來源": {"select": {"name": "文字"}},
+                        "原始訊息": {"rich_text": [{"text": {"content": text}}]}
+                    }
+                    if due_date and due_date != "#":
+                        properties["截止或考試日期"] = {"date": {"start": due_date}}
+                        
+                    create_page(TODO_ACTIVITIES_DB_ID, properties)
+                    due_msg = f"，截止日期：{due_date}" if (due_date and due_date != "#") else ""
+                    send_telegram_message(f"已自動分析並新增待辦：{name} (科目: {subject}{due_msg})")
+                    
+                elif action == "complete_todo":
+                    name = data.get("name")
+                    actual_time_str = data.get("actual_time")
+                    time_spent = None
+                    if actual_time_str and actual_time_str != "#":
+                        try:
+                            time_spent = int(actual_time_str)
+                        except:
+                            pass
+                            
+                    if not name or name == "#":
+                        send_telegram_message("無法識別要完成的事項名稱。")
+                        continue
+                        
+                    # 搜尋未完成的任務
+                    query = {
+                        "filter": {
+                            "and": [
+                                {"property": "名稱", "title": {"contains": name}}
+                            ]
+                        }
+                    }
+                    results = query_database_all(TODO_ACTIVITIES_DB_ID, query)
+                    uncompleted = [r for r in results if not is_task_completed(r)]
+                    if uncompleted:
+                        target = uncompleted[0]
+                        total_pages = get_number(target, "總頁數/題數") or 1
+                        update_properties = {
+                            "已完成頁數/題數": {"number": total_pages}
+                        }
+                        if time_spent is not None:
+                            update_properties["實際耗時"] = {"number": time_spent}
+                        update_page(target["id"], update_properties)
+                        time_msg = f"，耗時 {time_spent} 分鐘" if time_spent is not None else ""
+                        send_telegram_message(f"已將待辦【{get_title(target, '名稱')}】標記為完成{time_msg}。")
+                    else:
+                        send_telegram_message(f"找不到名稱包含【{name}】且未完成的待辦事項。")
+                        
+                elif action == "add_activity":
+                    name = data.get("name") or "未命名活動"
+                    date_val = data.get("date") or today_str
+                    a_type = data.get("type") or "其他"
+                    
+                    properties = {
+                        "活動名稱": {"title": [{"text": {"content": name}}]},
+                        "日期": {"date": {"start": date_val}},
+                        "類型": {"select": {"name": a_type}}
+                    }
+                    create_page(ACTIVITIES_DB_ID, properties)
+                    send_telegram_message(f"已自動分析並新增活動：{name} (日期: {date_val}, 類型: {a_type})")
+                    
+                elif action == "add_expense":
+                    name = data.get("name") or "未分類消費"
+                    amount = data.get("amount") or 0
+                    cat = data.get("category") or "飲食"
+                    
+                    properties = {
+                        "項目名稱": {"title": [{"text": {"content": name}}]},
+                        "金額": {"number": amount},
+                        "分類": {"select": {"name": cat}},
+                        "日期": {"date": {"start": today_str}}
+                    }
+                    create_page(LEDGER_DB_ID, properties)
+                    send_telegram_message(f"已自動記帳：{name}，金額：{amount} 元 (分類: {cat})")
+                    
                 else:
-                    iso_dt = dt_info['date']
-            properties = {
-                "名稱": {"title": [{"text": {"content": title}}]},
-                "類型": {"select": {"name": "其他"}},
-                "日期時間": {"date": {"start": iso_dt}} if iso_dt else {},
-                "來源": {"select": {"name": "文字"}},
-                "原始訊息": {"rich_text": [{"text": {"content": raw_text}}]}
-            }
-            create_page(TODO_ACTIVITIES_DB_ID, properties)
-            send_telegram_message(f"已新增通用待辦：{title}")
+                    # generic_todo or fallback
+                    name = data.get("name") or text
+                    date_val = data.get("date")
+                    
+                    properties = {
+                        "名稱": {"title": [{"text": {"content": name}}]},
+                        "類型": {"select": {"name": "作業"}},
+                        "來源": {"select": {"name": "文字"}},
+                        "原始訊息": {"rich_text": [{"text": {"content": text}}]}
+                    }
+                    if date_val and date_val != "#":
+                        properties["截止或考試日期"] = {"date": {"start": date_val}}
+                        
+                    create_page(TODO_ACTIVITIES_DB_ID, properties)
+                    send_telegram_message(f"已自動新增備忘待辦：{name}")
+                    
+            except Exception as e:
+                print(f"自動路由分析失敗: {e}")
+                # Fallback to simple title extraction
+                properties = {
+                    "名稱": {"title": [{"text": {"content": text}}]},
+                    "類型": {"select": {"name": "作業"}},
+                    "來源": {"select": {"name": "文字"}},
+                    "原始訊息": {"rich_text": [{"text": {"content": text}}]}
+                }
+                create_page(TODO_ACTIVITIES_DB_ID, properties)
+                send_telegram_message(f"已新增通用待辦（解析失敗備份）：{text}")
             continue
             
         print(f"收到指令: {text}")
@@ -931,6 +1033,59 @@ def analyze_calendar_text(text_content, today_str):
           "type": "休息"
         }}
       ]
+    }}
+    """
+    model = genai.GenerativeModel('gemini-3.1-flash-lite')
+    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    return json.loads(response.text.strip())
+
+def route_and_parse_natural_text(text_content, today_str):
+    prompt = f"""
+    請幫我分析以下使用者的日常文字訊息，並自動判定他們想要執行的動作。基準日期為：{today_str}。
+    
+    可判定的動作（action）與其對應的提取資料（data）如下：
+    
+    1. action: "add_todo" (新增功課、作業、小考、考試準備等待辦事項)
+       提取 data 欄位：
+       - name (功課/待辦事項名稱或描述，請使用簡短的繁體中文，且不要包含科目名稱，例如「英文閱讀報告」-> name為「閱讀報告」)
+       - subject (相關科目，例如「數學」、「英文」、「物理」等，若無請填 "無")
+       - due_date (截止日期，格式為 YYYY-MM-DD。若無提到請填 "#")
+       - type (類型，必須是以下之一："作業"、"小考"、"段考"、"回條"、"報名表"、"活動")
+       
+    2. action: "complete_todo" (標記某個待辦事項/功課為已完成)
+       提取 data 欄位：
+       - name (要標記完成的事項關鍵字/名稱)
+       - actual_time (實際耗時，必須是整數數字字串，表示分鐘，例如 "60"。若未提及則填 "#")
+       
+    3. action: "add_activity" (新增一次性活動、比賽、講座、營隊等)
+       提取 data 欄位：
+       - name (活動名稱)
+       - date (活動日期，格式為 YYYY-MM-DD)
+       - type (類型，必須是以下之一："講座"、"營隊"、"比賽"、"志工"、"休閒"、"其他")
+       
+    4. action: "add_expense" (記帳、新增一筆消費記錄)
+       提取 data 欄位：
+       - name (消費項目名稱或商店名稱，例如 "麥當勞"、"7-11 飲料")
+       - amount (消費總金額，必須是整數數字)
+       - category (分類，必須是以下之一："飲食"、"交通"、"娛樂"、"學習")
+       
+    5. action: "generic_todo" (不符合以上，但屬於一般隨手記下的待辦/備忘)
+       提取 data 欄位：
+       - name (待辦名稱)
+       - date (時間/日期，格式為 YYYY-MM-DD。若無提到請填 "#")
+
+    待解析敘述：
+    "{text_content}"
+
+    請僅返回以下 JSON 格式，不要包含 any markdown 標記（如 ```json 等）：
+    {{
+      "action": "add_todo",
+      "data": {{
+        "name": "作業名稱",
+        "subject": "科目",
+        "due_date": "2026-07-07",
+        "type": "作業"
+      }}
     }}
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
