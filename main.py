@@ -384,6 +384,8 @@ def process_telegram_commands(today_dt):
             cmd_type = "finish"
         elif text.startswith("@act"):
             cmd_type = "act"
+        elif text.startswith("@calendar") or text.startswith("@schedule"):
+            cmd_type = "calendar"
         else:
             # Generic entry handling (no prefix)
             from utils import extract_date_time, clean_title
@@ -564,6 +566,100 @@ def process_telegram_commands(today_dt):
                             
                         create_page(ACTIVITIES_DB_ID, properties)
                         send_telegram_message(f"已成功新增活動：{name} (日期: {date_val})")
+            
+            elif cmd_type == "calendar":
+                res_json = None
+                if file_bytes:
+                    try:
+                        res_json = analyze_calendar_image_bytes(file_bytes, today_str)
+                    except Exception as gem_err:
+                        print(f"Gemini analyze_calendar_image_bytes 失敗: {gem_err}")
+                        send_telegram_message(f"分析行事曆圖片失敗: {gem_err}")
+                else:
+                    # Strip command prefix
+                    raw_content = text
+                    if raw_content.startswith("@calendar"):
+                        raw_content = raw_content[9:].strip()
+                    elif raw_content.startswith("@schedule"):
+                        raw_content = raw_content[9:].strip()
+                    if raw_content:
+                        try:
+                            res_json = analyze_calendar_text(raw_content, today_str)
+                        except Exception as gem_err:
+                            print(f"Gemini analyze_calendar_text 失敗: {gem_err}")
+                            send_telegram_message(f"分析行事曆文字失敗: {gem_err}")
+                            
+                if res_json:
+                    fixed_list = res_json.get("fixed_schedule", [])
+                    events_list = res_json.get("weekly_events", [])
+                    
+                    fixed_added = 0
+                    events_added = 0
+                    
+                    # 1. 寫入固定課表
+                    for item in fixed_list:
+                        sub = item.get("subject")
+                        w = item.get("weekday")
+                        t_range = item.get("time_range")
+                        vac = item.get("is_vacation") or "暑假"
+                        if sub and w and t_range:
+                            # 檢查是否已存在
+                            check_query = {
+                                "filter": {
+                                    "and": [
+                                        {"property": "科目名稱", "title": {"equals": sub}},
+                                        {"property": "星期", "number": {"equals": int(w)}},
+                                        {"property": "作息類型", "select": {"equals": vac}}
+                                    ]
+                                }
+                            }
+                            existing = query_database_all(FIXED_SCHEDULE_DB_ID, check_query)
+                            if not existing:
+                                create_page(FIXED_SCHEDULE_DB_ID, {
+                                    "科目名稱": {"title": [{"text": {"content": sub}}]},
+                                    "星期": {"number": int(w)},
+                                    "時間段": {"rich_text": [{"text": {"content": t_range}}]},
+                                    "作息類型": {"select": {"name": vac}},
+                                    "是否可寫作業": {"checkbox": False}
+                                })
+                                fixed_added += 1
+                                
+                    # 2. 寫入一次性行程與請假/補課
+                    # 為了避免在同個日期重複，我們先按日期分組，將有新日程的那些日期上原本由 Bot 建立的日程清空
+                    dates_to_clear = {e.get("date") for e in events_list if e.get("date")}
+                    for d in dates_to_clear:
+                        clear_query = {
+                            "filter": {
+                                "and": [
+                                    {"property": "日期", "date": {"equals": d}}
+                                ]
+                            }
+                        }
+                        day_events = query_database_all(WEEKLY_CALENDAR_DB_ID, clear_query)
+                        bot_user_id = get_bot_user_id()
+                        for ev in day_events:
+                            created_by_id = ev.get("created_by", {}).get("id")
+                            if bot_user_id and created_by_id == bot_user_id:
+                                delete_page(ev["id"])
+                                
+                    # 寫入新日程
+                    for ev in events_list:
+                        ev_date = ev.get("date")
+                        ev_name = ev.get("name")
+                        ev_start = ev.get("start")
+                        ev_end = ev.get("end")
+                        ev_type = ev.get("type") or "上課"
+                        if ev_date and ev_name and ev_start and ev_end:
+                            create_page(WEEKLY_CALENDAR_DB_ID, {
+                                "行程名稱": {"title": [{"text": {"content": ev_name}}]},
+                                "日期": {"date": {"start": ev_date}},
+                                "開始時間": {"rich_text": [{"text": {"content": ev_start}}]},
+                                "結束時間": {"rich_text": [{"text": {"content": ev_end}}]},
+                                "行程類型": {"select": {"name": ev_type}}
+                            })
+                            events_added += 1
+                            
+                    send_telegram_message(f"成功匯入日程！\n- 新增固定課表：{fixed_added} 筆\n- 規劃行事曆事件：{events_added} 筆")
         except Exception as proc_err:
             print(f"處理指令出錯 [{text}]: {proc_err}")
             send_telegram_message(f"處理指令出錯：{proc_err}")
@@ -723,6 +819,122 @@ def analyze_activity_brochure_bytes(content, user_instruction=""):
         },
         prompt
     ], generation_config={"response_mime_type": "application/json"})
+    return json.loads(response.text.strip())
+
+def analyze_calendar_image_bytes(content, today_str):
+    mime_type = get_file_mime_type(content)
+    prompt = f"""
+    請幫我分析這張行事曆、功課表或課表照片，提取其中所有的日常固定課表與一次性日程事件（包括活動、志工、比賽、請假、停課、補課等）。
+    
+    今天日期為：{today_str}（請以此基準年份和日期，正確推算照片中的年月日，格式皆為 YYYY-MM-DD）。
+    
+    請仔細分析照片中的每一天，並提取以下兩類資訊：
+    
+    1. fixed_schedule (重複性的固定課表/作息)：
+       - subject (科目或項目名稱)
+       - weekday (星期，整數 1-7，1為星期一，7為星期日)
+       - time_range (時間段，格式如 "13:30-16:45")
+       - is_vacation (作息類型，請判斷是 "暑假" 還是 "學期中")
+       
+    2. weekly_events (一次性的具體日期行程、請假或補課)：
+       - date (日期，格式為 YYYY-MM-DD)
+       - name (行程名稱。如果是請假，名稱中必須包含「請假」或「停課」，例如 "PC化學請假"、"PC物理 停課"、"PC化學 (休息!)"；如果是補課，名稱中必須包含「補課」，例如 "MEC補課")
+       - start (開始時間，格式如 "08:30" 或 "18:30")
+       - end (結束時間，格式如 "12:00" 或 "21:30")
+       - type (行程類型，必須是以下五個之一："上課"、"自習寫功課"、"考試準備"、"段考複習"、"休息"。請注意：請假/停課/休息日的 type 請填 "休息"，上課與補課/活動/志工的 type 請填 "上課")
+
+    請僅返回以下 JSON 格式，不要包含任何 markdown 標記（如 ```json 等）：
+    {{
+      "fixed_schedule": [
+        {{
+          "subject": "PC化學",
+          "weekday": 2,
+          "time_range": "13:30-16:45",
+          "is_vacation": "暑假"
+        }}
+      ],
+      "weekly_events": [
+        {{
+          "date": "2026-07-06",
+          "name": "高醫志工 (上午)",
+          "start": "08:30",
+          "end": "12:00",
+          "type": "上課"
+        }},
+        {{
+          "date": "2026-07-07",
+          "name": "PC化學請假",
+          "start": "13:30",
+          "end": "16:45",
+          "type": "休息"
+        }}
+      ]
+    }}
+    """
+    model = genai.GenerativeModel('gemini-1.5-pro')
+    response = model.generate_content([
+        {
+            'mime_type': mime_type,
+            'data': content
+        },
+        prompt
+    ], generation_config={"response_mime_type": "application/json"})
+    return json.loads(response.text.strip())
+
+def analyze_calendar_text(text_content, today_str):
+    prompt = f"""
+    請幫我分析以下行事曆或課表敘述文字，提取其中所有的日常固定課表與一次性日程事件（包括活動、志工、比賽、請假、停課、補課等）。
+    
+    今天日期為：{today_str}（請以此基準年份和日期，正確推算敘述中的年月日，格式皆為 YYYY-MM-DD）。
+    
+    請提取以下兩類資訊：
+    
+    1. fixed_schedule (重複性的固定課表/作息)：
+       - subject (科目或項目名稱)
+       - weekday (星期，整數 1-7，1為星期一，7為星期日)
+       - time_range (時間段，格式如 "13:30-16:45")
+       - is_vacation (作息類型，請判斷是 "暑假" 還是 "學期中")
+       
+    2. weekly_events (一次性的具體日期行程、請假或補課)：
+       - date (日期，格式為 YYYY-MM-DD)
+       - name (行程名稱。如果是請假，名稱中必須包含「請假」或「停課」，例如 "PC化學請假"、"PC物理 停課"、"PC化學 (休息!)"；如果是補課，名稱中必須包含「補課」，例如 "MEC補課")
+       - start (開始時間，格式如 "08:30" 或 "18:30")
+       - end (結束時間，格式如 "12:00" 或 "21:30")
+       - type (行程類型，必須是以下五個之一："上課"、"自習寫功課"、"考試準備"、"段考複習"、"休息"。請注意：請假/停課/休息日的 type 請填 "休息"，上課與補課/活動/志工的 type 請填 "上課")
+
+    待解析敘述：
+    "{text_content}"
+
+    請僅返回以下 JSON 格式，不要包含任何 markdown 標記（如 ```json 等）：
+    {{
+      "fixed_schedule": [
+        {{
+          "subject": "PC化學",
+          "weekday": 2,
+          "time_range": "13:30-16:45",
+          "is_vacation": "暑假"
+        }}
+      ],
+      "weekly_events": [
+        {{
+          "date": "2026-07-06",
+          "name": "高醫志工 (上午)",
+          "start": "08:30",
+          "end": "12:00",
+          "type": "上課"
+        }},
+        {{
+          "date": "2026-07-07",
+          "name": "PC化學請假",
+          "start": "13:30",
+          "end": "16:45",
+          "type": "休息"
+        }}
+      ]
+    }}
+    """
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text.strip())
 
 # ==================== 核心邏輯 A：下午 5:00 執行 ====================
