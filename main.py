@@ -1332,37 +1332,34 @@ def run_mode_a(today_dt):
         if name:
             location_tracker[name] = (loc, r["id"])
 
-    # 2.4 計算明天出門要帶去的物品 (狀態在學校 -> 忽略；狀態在家裡 -> 要帶，並更新為在學校)
+    # 2.4 計算明天出門要帶去的物品 (狀態在學校 -> 忽略；狀態在家裡 -> 要帶)
     bring_to_school = [] # list of tuples: (item, label)
     for item, label in tomorrow_required_items.items():
         if item in location_tracker:
             loc, page_id = location_tracker[item]
             if loc == "在家裡":
                 bring_to_school.append((item, label))
-                update_page(page_id, {"目前位置": {"select": {"name": "在學校"}}})
         else:
-            # 追蹤庫中沒有的物品，預設新增且預設在學校 (因為判定要帶去了)
+            # 追蹤庫中沒有的物品，預設新增且預設在家裡 (以便之後提示需要帶去)
             bring_to_school.append((item, label))
             create_page(BOOK_TRACKER_DB_ID, {
                 "科目/物品名稱": {"title": [{"text": {"content": item}}]},
-                "目前位置": {"select": {"name": "在學校"}}
+                "目前位置": {"select": {"name": "在家裡"}}
             })
 
-    # 2.5 計算今天放學要帶回的物品 (狀態在家裡 -> 忽略；狀態在學校 -> 要帶回，並更新為在家裡)
+    # 2.5 計算今天放學要帶回的物品 (狀態在家裡 -> 忽略；狀態在學校 -> 要帶回)
     take_home = [] # list of tuples: (item, label)
     for item, label in future_study_subjects.items():
         if item in location_tracker:
             loc, page_id = location_tracker[item]
             if loc == "在學校":
                 take_home.append((item, label))
-                update_page(page_id, {"Currently_At": {"select": {"name": "在家裡"}}})
-                update_page(page_id, {"目前位置": {"select": {"name": "在家裡"}}})
         else:
-            # 預防性新增，假設判定要帶回，狀態更新為在家裡
+            # 追蹤庫中沒有的物品，預設新增且預設在學校 (以便之後提示需要帶回)
             take_home.append((item, label))
             create_page(BOOK_TRACKER_DB_ID, {
                 "科目/物品名稱": {"title": [{"text": {"content": item}}]},
-                "目前位置": {"select": {"name": "在家裡"}}
+                "目前位置": {"select": {"name": "在學校"}}
             })
 
     # 2.6 將兩個清單寫入明天 (tomorrow) Notion 行事曆的「今日攜帶清單」
@@ -1404,19 +1401,8 @@ def run_mode_a(today_dt):
     }
     today_ledgers = query_database_all(LEDGER_DB_ID, today_ledger_filter)
     total_spend = sum([get_number(x, "金額") or 0 for x in today_ledgers])
-    
-    finance_joke = "錢包非常安全，今天一毛錢都沒花！"
-    if total_spend > 0:
-        try:
-            spend_details = ", ".join([f"{get_title(x, '項目名稱')}({get_number(x, '金額')}元)" for x in today_ledgers])
-            model = genai.GenerativeModel('gemini-3.1-flash-lite')
-            joke_prompt = f"今天總共花了 {total_spend} 元，消費項目包括：{spend_details}。請根據這些消費內容寫一句幽默、口語化且帶有警示效果的繁體中文理財提醒，字數在 50 字以內。"
-            joke_res = model.generate_content(joke_prompt)
-            finance_joke = joke_res.text.strip()
-        except Exception as e:
-            finance_joke = f"今天花了 {total_spend} 元，記得開源節流喔！"
 
-    # 組裝 Telegram 訊息 (移除 emoji 標註)
+    # 組裝 Telegram 訊息 (移除 emoji 標註與理財提醒)
     telegram_msg = f"""
 【Life-Agent 傍晚通知 - 書包檢查與記帳】
 
@@ -1433,7 +1419,6 @@ def run_mode_a(today_dt):
 
 [今日消費統計]
 - 總計花費：{total_spend} 元
-- 理財提醒：{finance_joke}
 """
     send_telegram_message(telegram_msg)
 
@@ -1934,6 +1919,36 @@ def run_mode_b(today_dt):
         }
         create_page(WEEKLY_CALENDAR_DB_ID, properties)
         print(f"已寫入行程: {start_str}-{end_str} [{event['type']}] {event['name']}")
+
+    # 5.5 更新 Notion 中的書籍追蹤位置狀態做為跨日轉移
+    try:
+        today_subjects = {get_title(s, "科目名稱") for s in today_fixed_schedules if get_title(s, "科目名稱")}
+        
+        yesterday_todos = query_database_all(TODO_ACTIVITIES_DB_ID, {
+            "filter": {
+                "and": [
+                    {"property": "截止或考試日期", "date": {"equals": yesterday_str}}
+                ]
+            }
+        })
+        yesterday_subjects = {get_rich_text(t, "相關科目") for t in yesterday_todos if get_rich_text(t, "相關科目")}
+        yesterday_subjects = {sub for sub in yesterday_subjects if sub and sub.lower() != "無"}
+        
+        tracker_results = query_database_all(BOOK_TRACKER_DB_ID)
+        tracker_map = {get_title(r, "科目/物品名稱"): r["id"] for r in tracker_results if get_title(r, "科目/物品名稱")}
+        
+        for sub in today_subjects:
+            if sub in tracker_map:
+                update_page(tracker_map[sub], {"目前位置": {"select": {"name": "在學校"}}})
+                update_page(tracker_map[sub], {"Currently_At": {"select": {"name": "在學校"}}})
+                
+        for sub in yesterday_subjects:
+            if sub in tracker_map:
+                update_page(tracker_map[sub], {"目前位置": {"select": {"name": "在家裡"}}})
+                update_page(tracker_map[sub], {"Currently_At": {"select": {"name": "在家裡"}}})
+        print("已成功進行跨日書籍追蹤位置自動轉移。")
+    except Exception as e:
+        print(f"書籍位置狀態自動轉移失敗: {e}")
 
     # 6. Telegram 發送今日日程 (無 emoji 格式)
     schedule_lines = []
