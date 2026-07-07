@@ -7,6 +7,8 @@ import pytz
 from datetime import datetime, timedelta, date
 from PIL import Image
 import google.generativeai as genai
+import re
+
 
 # 解決 Windows 控制台編碼問題
 if sys.platform.startswith("win"):
@@ -537,7 +539,6 @@ def process_telegram_commands(today_dt):
                 # Extract optional time at end of command
                 time_match = None
                 if text.strip().endswith(')') is False:
-                    import re
                     time_match = re.search(r"(\d{1,2}:\d{2})$", text.strip())
                 time_str = time_match.group(1) if time_match else None
                 cmd_data = parse_hw_command(text, today_str)
