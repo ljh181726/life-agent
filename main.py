@@ -1363,6 +1363,8 @@ def run_mode_a(today_dt):
             })
 
     # 2.6 將兩個清單寫入明天 (tomorrow) Notion 行事曆的「今日攜帶清單」
+    bring_to_school.sort(key=lambda x: x[0])
+    take_home.sort(key=lambda x: x[0])
     bring_to_school_str = "\n".join([f"- {x[0]} ({x[1]})" for x in bring_to_school]) if bring_to_school else "無"
     take_home_str = "\n".join([f"- {x[0]} ({x[1]})" for x in take_home]) if take_home else "無"
     
@@ -1798,14 +1800,15 @@ def run_mode_b(today_dt):
             split_tasks.append(task)
 
     planned_events = []
-    # 寫入固定上課行程
+    # 寫入固定上課行程 (保留原本的類型與使用者行程標記)
     for event in fixed_events:
         planned_events.append({
             "name": event["name"],
-            "type": "上課",
+            "type": event.get("type", "上課"),
             "start": event["start"],
             "end": event["end"],
-            "note": ""
+            "note": "",
+            "is_user_event": event.get("is_user_event", False)
         })
 
     # 分配位置輔助函式
@@ -1891,7 +1894,7 @@ def run_mode_b(today_dt):
             "note": ""
         })
 
-    planned_events.sort(key=lambda x: x["start"])
+    planned_events.sort(key=lambda x: (x["start"], x["end"]))
 
     # 5. 批次寫回 Notion
     # 僅刪除屬於機器人自動生成的現有事件
