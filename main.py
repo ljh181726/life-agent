@@ -407,9 +407,7 @@ def process_telegram_commands(today_dt):
                     properties = {
                         "名稱": {"title": [{"text": {"content": name}}]},
                         "類型": {"select": {"name": t_type}},
-                        "相關科目": {"rich_text": [{"text": {"content": subject}}]},
-                        "來源": {"select": {"name": "文字"}},
-                        "原始訊息": {"rich_text": [{"text": {"content": text}}]}
+                        "相關科目": {"rich_text": [{"text": {"content": subject}}]}
                     }
                     if due_date and due_date != "#":
                         properties["截止或考試日期"] = {"date": {"start": due_date}}
@@ -490,9 +488,7 @@ def process_telegram_commands(today_dt):
                     
                     properties = {
                         "名稱": {"title": [{"text": {"content": name}}]},
-                        "類型": {"select": {"name": "作業"}},
-                        "來源": {"select": {"name": "文字"}},
-                        "原始訊息": {"rich_text": [{"text": {"content": text}}]}
+                        "類型": {"select": {"name": "作業"}}
                     }
                     if date_val and date_val != "#":
                         properties["截止或考試日期"] = {"date": {"start": date_val}}
@@ -505,9 +501,7 @@ def process_telegram_commands(today_dt):
                 # Fallback to simple title extraction
                 properties = {
                     "名稱": {"title": [{"text": {"content": text}}]},
-                    "類型": {"select": {"name": "作業"}},
-                    "來源": {"select": {"name": "文字"}},
-                    "原始訊息": {"rich_text": [{"text": {"content": text}}]}
+                    "類型": {"select": {"name": "作業"}}
                 }
                 create_page(TODO_ACTIVITIES_DB_ID, properties)
                 send_telegram_message(f"已新增通用待辦（解析失敗備份）：{text}")
@@ -567,7 +561,7 @@ def process_telegram_commands(today_dt):
                     properties = {
                         "名稱": {"title": [{"text": {"content": name}}]},
                         "類型": {"select": {"name": "作業"}},
-                        "日期時間": {"date": {"start": iso_datetime if time_str else due_date}},
+                        "截止或考試日期": {"date": {"start": iso_datetime if time_str else due_date}},
                         "相關科目": {"rich_text": [{"text": {"content": subject}}]},
                         "總頁數/題數": {"number": 1},
                         "已完成頁數/題數": {"number": 0}
@@ -632,7 +626,7 @@ def process_telegram_commands(today_dt):
                                 properties = {
                                     "活動名稱": {"title": [{"text": {"content": act_name}}]},
                                     "類型": {"select": {"name": act_type}},
-                                    "日期時間": {"date": {"start": act_date}},
+                                    "日期": {"date": {"start": act_date}},
                                     "備註": {"rich_text": [{"text": {"content": act_note}}]}
                                 }
                                 if file_url:
@@ -645,7 +639,7 @@ def process_telegram_commands(today_dt):
                                     new_row_properties = {
                                         "活動名稱": {"title": [{"text": {"content": event.get("name", "未命名活動")}}]},
                                         "類型": {"select": {"name": event.get("type", "其他")}},
-                                        "日期時間": {"date": {"start": event.get("date", today_str)}},
+                                        "日期": {"date": {"start": event.get("date", today_str)}},
                                         "備註": {"rich_text": [{"text": {"content": f"由 {act_name} 簡章自動生成\n---\n系統提取資訊：{event.get('note', '')}"}}]}
                                     }
                                     create_page(ACTIVITIES_DB_ID, new_row_properties)
