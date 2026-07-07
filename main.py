@@ -334,6 +334,15 @@ def parse_act_command(text, today_str):
         print(f"Gemini parse_act_command 失敗: {e}")
         return {"name": raw_content, "date": "#"}
 
+def is_valid_date_format(date_str):
+    if not date_str:
+        return False
+    try:
+        datetime.strptime(date_str.strip(), "%Y-%m-%d")
+        return True
+    except:
+        return False
+
 def process_telegram_commands(today_dt):
     if not TELEGRAM_BOT_TOKEN:
         print("未設定 TELEGRAM_BOT_TOKEN，跳過指令處理。")
@@ -403,17 +412,19 @@ def process_telegram_commands(today_dt):
                     
                     if not name or name == "#":
                         name = "未命名待辦"
+                    if t_type not in ["作業", "小考", "段考", "回條", "報名表"]:
+                        t_type = "作業"
                     
                     properties = {
                         "名稱": {"title": [{"text": {"content": name}}]},
                         "類型": {"select": {"name": t_type}},
                         "相關科目": {"rich_text": [{"text": {"content": subject}}]}
                     }
-                    if due_date and due_date != "#":
-                        properties["截止或考試日期"] = {"date": {"start": due_date}}
+                    if due_date and is_valid_date_format(due_date):
+                        properties["截止或考試日期"] = {"date": {"start": due_date.strip()}}
                         
                     create_page(TODO_ACTIVITIES_DB_ID, properties)
-                    due_msg = f"，截止日期：{due_date}" if (due_date and due_date != "#") else ""
+                    due_msg = f"，截止日期：{due_date}" if (due_date and is_valid_date_format(due_date)) else ""
                     send_telegram_message(f"已自動分析並新增待辦：{name} (科目: {subject}{due_msg})")
                     
                 elif action == "complete_todo":
@@ -459,9 +470,14 @@ def process_telegram_commands(today_dt):
                     date_val = data.get("date") or today_str
                     a_type = data.get("type") or "其他"
                     
+                    if not is_valid_date_format(date_val):
+                        date_val = today_str
+                    if a_type not in ["講座", "營隊", "比賽", "志工", "休閒", "其他"]:
+                        a_type = "其他"
+                    
                     properties = {
                         "活動名稱": {"title": [{"text": {"content": name}}]},
-                        "日期": {"date": {"start": date_val}},
+                        "日期": {"date": {"start": date_val.strip()}},
                         "類型": {"select": {"name": a_type}}
                     }
                     create_page(ACTIVITIES_DB_ID, properties)
@@ -471,6 +487,13 @@ def process_telegram_commands(today_dt):
                     name = data.get("name") or "未分類消費"
                     amount = data.get("amount") or 0
                     cat = data.get("category") or "飲食"
+                    
+                    try:
+                        amount = int(amount)
+                    except:
+                        amount = 0
+                    if cat not in ["飲食", "交通", "娛樂", "學習"]:
+                        cat = "飲食"
                     
                     properties = {
                         "項目名稱": {"title": [{"text": {"content": name}}]},
@@ -490,8 +513,8 @@ def process_telegram_commands(today_dt):
                         "名稱": {"title": [{"text": {"content": name}}]},
                         "類型": {"select": {"name": "作業"}}
                     }
-                    if date_val and date_val != "#":
-                        properties["截止或考試日期"] = {"date": {"start": date_val}}
+                    if date_val and is_valid_date_format(date_val):
+                        properties["截止或考試日期"] = {"date": {"start": date_val.strip()}}
                         
                     create_page(TODO_ACTIVITIES_DB_ID, properties)
                     send_telegram_message(f"已自動新增備忘待辦：{name}")
