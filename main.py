@@ -9,6 +9,25 @@ from PIL import Image
 import google.generativeai as genai
 import re
 
+def safe_load_json(text):
+    if not text:
+        return {}
+    text_clean = text.strip()
+    if text_clean.startswith("```"):
+        lines = text_clean.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text_clean = "\n".join(lines).strip()
+    if text_clean.startswith("```json"):
+        text_clean = text_clean[7:].strip()
+    if text_clean.startswith("```"):
+        text_clean = text_clean[3:].strip()
+    if text_clean.endswith("```"):
+        text_clean = text_clean[:-3].strip()
+    return json.loads(text_clean)
+
 
 # 解決 Windows 控制台編碼問題
 if sys.platform.startswith("win"):
@@ -70,6 +89,9 @@ if GEMINI_API_KEY:
 # ==================== Notion API 輔助函式 ====================
 
 def query_database_all(database_id, filter_payload=None):
+    if not database_id:
+        print("警告: 查詢的資料庫 ID 為空！")
+        return []
     results = []
     has_more = True
     next_cursor = None
@@ -90,6 +112,9 @@ def query_database_all(database_id, filter_payload=None):
     return results
 
 def create_page(database_id, properties):
+    if not database_id:
+        print("警告: 建立頁面的資料庫 ID 為空！")
+        return {}
     url = "https://api.notion.com/v1/pages"
     data = {
         "parent": {"database_id": database_id},
@@ -262,7 +287,7 @@ def parse_hw_command(text, today_str):
         """
         model = genai.GenerativeModel('gemini-3.1-flash-lite')
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-        return json.loads(response.text.strip())
+        return safe_load_json(response.text)
     except Exception as e:
         print(f"Gemini parse_hw_command 失敗: {e}")
         parts = raw_content.split()
@@ -296,7 +321,7 @@ def parse_finish_command(text):
         """
         model = genai.GenerativeModel('gemini-3.1-flash-lite')
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-        return json.loads(response.text.strip())
+        return safe_load_json(response.text)
     except Exception as e:
         print(f"Gemini parse_finish_command 失敗: {e}")
         parts = raw_content.split()
@@ -329,7 +354,7 @@ def parse_act_command(text, today_str):
         """
         model = genai.GenerativeModel('gemini-3.1-flash-lite')
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-        return json.loads(response.text.strip())
+        return safe_load_json(response.text)
     except Exception as e:
         print(f"Gemini parse_act_command 失敗: {e}")
         return {"name": raw_content, "date": "#"}
@@ -845,7 +870,7 @@ def analyze_receipt(image_url):
         },
         prompt
     ], generation_config={"response_mime_type": "application/json"})
-    return json.loads(response.text.strip())
+    return safe_load_json(response.text)
 
 def analyze_todo_photo(image_url, today_str):
     print(f"開始分析聯絡簿/考卷/回條照片: {image_url[:60]}...")
@@ -878,7 +903,7 @@ def analyze_todo_photo_bytes(content, today_str):
         },
         prompt
     ], generation_config={"response_mime_type": "application/json"})
-    return json.loads(response.text.strip())
+    return safe_load_json(response.text)
 
 def analyze_activity_brochure(image_url, user_instruction=""):
     print(f"開始分析活動簡章照片: {image_url[:60]}...")
@@ -939,7 +964,7 @@ def analyze_activity_brochure_bytes(content, user_instruction=""):
         },
         prompt
     ], generation_config={"response_mime_type": "application/json"})
-    return json.loads(response.text.strip())
+    return safe_load_json(response.text)
 
 def analyze_calendar_image_bytes(content, today_str):
     mime_type = get_file_mime_type(content)
@@ -999,7 +1024,7 @@ def analyze_calendar_image_bytes(content, today_str):
         },
         prompt
     ], generation_config={"response_mime_type": "application/json"})
-    return json.loads(response.text.strip())
+    return safe_load_json(response.text)
 
 def analyze_calendar_text(text_content, today_str):
     prompt = f"""
@@ -1055,7 +1080,7 @@ def analyze_calendar_text(text_content, today_str):
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
     response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-    return json.loads(response.text.strip())
+    return safe_load_json(response.text)
 
 def route_and_parse_natural_text(text_content, today_str):
     prompt = f"""
@@ -1108,7 +1133,7 @@ def route_and_parse_natural_text(text_content, today_str):
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
     response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-    return json.loads(response.text.strip())
+    return safe_load_json(response.text)
 
 # ==================== 核心邏輯 A：下午 5:00 執行 ====================
 
