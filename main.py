@@ -368,6 +368,30 @@ def is_valid_date_format(date_str):
     except:
         return False
 
+SUBJECT_WRITE_BUDGETS = {
+    "國文": 30,
+    "數學": 10,
+    "英文": 0,
+    "物理": 20,
+    "化學": 20
+}
+
+def get_subject_budget(event_name):
+    if not event_name:
+        return 0
+    for sub in SUBJECT_WRITE_BUDGETS:
+        if sub in event_name:
+            return SUBJECT_WRITE_BUDGETS[sub]
+    return 0
+
+def get_subject_budget_key(event_name):
+    if not event_name:
+        return None
+    for sub in ["國文", "數學", "英文", "物理", "化學"]:
+        if sub in event_name:
+            return sub
+    return None
+
 def process_telegram_commands(today_dt):
     if not TELEGRAM_BOT_TOKEN:
         print("未設定 TELEGRAM_BOT_TOKEN，跳過指令處理。")
@@ -1607,6 +1631,7 @@ def run_mode_b(today_dt):
                         print(f"偵測到保留行程/一次性事件，已視為固定行程: {start_time_str}-{end_time_str} {name}")
                 except Exception as e:
                     print(f"解析保留行程時間失敗 [{name}]: {e}")
+    db_fixed_events = []
     for s in today_fixed_schedules:
         time_range = get_rich_text(s, "時間段")
         name = get_title(s, "科目名稱")
@@ -1634,7 +1659,7 @@ def run_mode_b(today_dt):
                 start_s, end_s = time_range.strip().split("-")
                 sh, sm = map(int, start_s.split(":"))
                 eh, em = map(int, end_s.split(":"))
-                fixed_events.append({
+                db_fixed_events.append({
                     "name": name,
                     "start": sh * 60 + sm,
                     "end": eh * 60 + em,
@@ -1643,13 +1668,55 @@ def run_mode_b(today_dt):
             except Exception as e:
                 print(f"解析課表時間段失敗 [{time_range}]: {e}")
 
-    if not is_vac and not fixed_events:
-        fixed_events.append({
-            "name": "學校上課",
-            "start": 8 * 60,
-            "end": 17 * 60,
-            "type": "上課"
-        })
+    # 建構基礎在校節次作息 (週一至週五)
+    if today_w in [1, 2, 3, 4, 5]:
+        default_periods = [
+            {"name": "準備時間", "start": 8 * 60, "end": 8 * 60 + 10, "type": "上課"},
+            {"name": "第 1 節課", "start": 8 * 60 + 10, "end": 9 * 60, "type": "上課", "period": 1},
+            {"name": "課間活動", "start": 9 * 60, "end": 9 * 60 + 10, "type": "上課"},
+            {"name": "第 2 節課", "start": 9 * 60 + 10, "end": 10 * 60, "type": "上課", "period": 2},
+            {"name": "打掃及課間活動", "start": 10 * 60, "end": 10 * 60 + 20, "type": "上課"},
+            {"name": "第 3 節課", "start": 10 * 60 + 20, "end": 11 * 60 + 10, "type": "上課", "period": 3},
+            {"name": "課間活動", "start": 11 * 60 + 10, "end": 11 * 60 + 20, "type": "上課"},
+            {"name": "第 4 節課", "start": 11 * 60 + 20, "end": 12 * 60 + 10, "type": "上課", "period": 4}
+        ]
+        if not is_vac:
+            # 學期中額外加入第 5-8 節課以及午休/午餐
+            default_periods.extend([
+                {"name": "午餐時間", "start": 12 * 60 + 10, "end": 12 * 60 + 40, "type": "上課"},
+                {"name": "午休時間", "start": 12 * 60 + 40, "end": 13 * 60 + 10, "type": "上課"},
+                {"name": "課間活動", "start": 13 * 60 + 10, "end": 13 * 60 + 20, "type": "上課"},
+                {"name": "第 5 節課", "start": 13 * 60 + 20, "end": 14 * 60 + 10, "type": "上課", "period": 5},
+                {"name": "課間活動", "start": 14 * 60 + 10, "end": 14 * 60 + 20, "type": "上課"},
+                {"name": "第 6 節課", "start": 14 * 60 + 20, "end": 15 * 60 + 10, "type": "上課", "period": 6},
+                {"name": "課間活動", "start": 15 * 60 + 10, "end": 15 * 60 + 20, "type": "上課"},
+                {"name": "第 7 節課", "start": 15 * 60 + 20, "end": 16 * 60 + 10, "type": "上課", "period": 7},
+                {"name": "課間活動", "start": 16 * 60 + 10, "end": 16 * 60 + 20, "type": "上課"},
+                {"name": "第 8 節課", "start": 16 * 60 + 20, "end": 17 * 60 + 10, "type": "上課", "period": 8}
+            ])
+            
+        # 進行合併：如果某個預設節次與來自 Notion 資料庫中的固定課表重疊，我們將其重新命名為該科目的名稱
+        for dp in default_periods:
+            for db_ev in db_fixed_events:
+                overlap = max(dp["start"], db_ev["start"]) < min(dp["end"], db_ev["end"])
+                if overlap:
+                    dp["name"] = db_ev["name"]
+                    
+        # 將合併後的課表加入到 fixed_events
+        fixed_events.extend(default_periods)
+        
+        # 處理資料庫中不重疊於平日預設課表的其他行程（例如晚上 PC化學 / MEC 等）
+        for db_ev in db_fixed_events:
+            has_overlap = False
+            for dp in default_periods:
+                if max(dp["start"], db_ev["start"]) < min(dp["end"], db_ev["end"]):
+                    has_overlap = True
+                    break
+            if not has_overlap:
+                fixed_events.append(db_ev)
+    else:
+        # 周末：直接加入所有資料庫行程
+        fixed_events.extend(db_fixed_events)
 
     # 讀取今天活動資料庫中的活動，並作為固定行程（Busy Blocks）避開 (預設 09:00 - 17:00)
     if ACTIVITIES_DB_ID:
@@ -1677,15 +1744,39 @@ def run_mode_b(today_dt):
         except Exception as e:
             print(f"讀取今日活動失敗: {e}")
 
-    # 初始化時間表：True 為可用自習，False 為佔用
+    # 初始化時間表：False 為佔用，"FREE" 為可用自習，字串為特定科目專屬時間
     day_minutes = [False] * 1440
     for block_start, block_end in available_blocks:
         for m in range(block_start, block_end):
-            day_minutes[m] = True
+            day_minutes[m] = "FREE"
             
+    original_fixed_classes = []
     for event in fixed_events:
-        for m in range(event["start"], event["end"]):
-            day_minutes[m] = False
+        start_m = event["start"]
+        end_m = event["end"]
+        name = event["name"]
+        
+        # 判斷是否為在校課程且有自習額度
+        budget = get_subject_budget(name)
+        
+        if budget > 0 and (end_m - start_m) >= budget:
+            sub_key = get_subject_budget_key(name)
+            # 將前 budget 分鐘設為該科目專屬
+            for m in range(start_m, start_m + budget):
+                day_minutes[m] = sub_key
+            # 剩餘時間為佔用 (False)
+            for m in range(start_m + budget, end_m):
+                day_minutes[m] = False
+                
+            original_fixed_classes.append({
+                "name": name,
+                "start": start_m,
+                "end": end_m,
+                "subject": sub_key
+            })
+        else:
+            for m in range(start_m, end_m):
+                day_minutes[m] = False
 
     # 準備待分配的任務
     tasks_to_allocate = []
@@ -1828,23 +1919,29 @@ def run_mode_b(today_dt):
             split_tasks.append(task)
 
     planned_events = []
-    # 寫入固定上課行程 (保留原本的類型與使用者行程標記)
+    # 寫入沒有自習額度的固定行程 (保留原本的類型與使用者行程標記)
     for event in fixed_events:
-        planned_events.append({
-            "name": event["name"],
-            "type": event.get("type", "上課"),
-            "start": event["start"],
-            "end": event["end"],
-            "note": "",
-            "is_user_event": event.get("is_user_event", False)
-        })
+        name = event["name"]
+        budget = get_subject_budget(name)
+        if budget <= 0:
+            planned_events.append({
+                "name": name,
+                "type": event.get("type", "上課"),
+                "start": event["start"],
+                "end": event["end"],
+                "note": "",
+                "is_user_event": event.get("is_user_event", False)
+            })
 
     # 分配位置輔助函式
-    def find_free_slot(duration):
+    def find_free_slot(task_subject, duration):
         consecutive_free = 0
         start_idx = -1
         for i in range(1440):
-            if day_minutes[i]:
+            val = day_minutes[i]
+            # 可用的分鐘包括 "FREE" 以及與任務科目相符的專屬時間
+            is_avail = (val == "FREE") or (task_subject and val == task_subject)
+            if is_avail:
                 if start_idx == -1:
                     start_idx = i
                 consecutive_free += 1
@@ -1857,13 +1954,17 @@ def run_mode_b(today_dt):
 
     unplanned_tasks = []
     for task in split_tasks:
+        sub = task["subject"]
+        if sub and sub.lower() == "無":
+            sub = None
+            
         if task["name"] == "番茄鐘伸展休息":
-            # 尋找 10 分鐘空擋
-            slot = find_free_slot(10)
+            # 尋找 10 分鐘空擋 (必須是 FREE)
+            slot = find_free_slot(None, 10)
             if slot:
                 start_m, end_m = slot
                 for m in range(start_m, end_m):
-                    day_minutes[m] = False
+                    day_minutes[m] = "TASK"
                 planned_events.append({
                     "name": task["name"],
                     "type": "休息",
@@ -1873,16 +1974,15 @@ def run_mode_b(today_dt):
                 })
             continue
 
-        slot = find_free_slot(task["duration"])
+        slot = find_free_slot(sub, task["duration"])
         if slot:
             start_m, end_m = slot
             for m in range(start_m, end_m):
-                day_minutes[m] = False
+                day_minutes[m] = "TASK"
                 
             # 核對課本位置，提供警報
             note = ""
-            sub = task["subject"]
-            if sub and sub != "無":
+            if sub:
                 loc = location_tracker.get(sub)
                 if loc == "在學校":
                     note = f"[警報]{sub}課本仍在學校！請找同學借閱或確認是否漏帶！"
@@ -1897,10 +1997,46 @@ def run_mode_b(today_dt):
         else:
             unplanned_tasks.append(task)
 
+    # 重組課程事件：對於原本有自習額度的課程，將未被 TASK 佔用的部分還原為 [上課]
+    for c in original_fixed_classes:
+        c_start = c["start"]
+        c_end = c["end"]
+        sub = c["subject"]
+        name = c["name"]
+        
+        in_class_block = False
+        block_start = -1
+        
+        for m in range(c_start, c_end):
+            val = day_minutes[m]
+            if val != "TASK":
+                if not in_class_block:
+                    in_class_block = True
+                    block_start = m
+            else:
+                if in_class_block:
+                    planned_events.append({
+                        "name": name,
+                        "type": "上課",
+                        "start": block_start,
+                        "end": m,
+                        "note": ""
+                    })
+                    in_class_block = False
+                    
+        if in_class_block:
+            planned_events.append({
+                "name": name,
+                "type": "上課",
+                "start": block_start,
+                "end": c_end,
+                "note": ""
+            })
+
     # 填補剩餘可用自習時間為自由休息
     rest_start = -1
     for i in range(1440):
-        if day_minutes[i]:
+        if day_minutes[i] == "FREE":
             if rest_start == -1:
                 rest_start = i
         else:
