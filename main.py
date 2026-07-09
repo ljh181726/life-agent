@@ -1313,9 +1313,11 @@ def run_mode_a(today_dt):
         tomorrow_required_items[sub] = "課堂課本"
         
     for t in tomorrow_todos:
+        t_name = get_title(t, "名稱")
+        if not t_name or t_name.strip() == "":
+            continue
         sub = get_rich_text(t, "相關科目")
         t_type = get_select(t, "類型")
-        t_name = get_title(t, "名稱")
         
         label = "明天作業"
         if t_type in ["回條", "報名表"]:
@@ -1333,7 +1335,7 @@ def run_mode_a(today_dt):
     preview_end_str = preview_end_dt.strftime("%Y-%m-%d")
     
     raw_study_todos = query_database_all(TODO_ACTIVITIES_DB_ID)
-    study_todos = [t for t in raw_study_todos if not is_task_completed(t)]
+    study_todos = [t for t in raw_study_todos if not is_task_completed(t) and get_title(t, "名稱") and get_title(t, "名稱").strip() != ""]
     future_study_subjects = {} # {科目: 標籤}
     for t in study_todos:
         due = get_date(t, "截止或考試日期")
@@ -1467,6 +1469,7 @@ def run_mode_b(today_dt):
         }
     }
     yesterday_todos = query_database_all(TODO_ACTIVITIES_DB_ID, yesterday_todo_filter)
+    yesterday_todos = [t for t in yesterday_todos if get_title(t, "名稱") and get_title(t, "名稱").strip() != ""]
     
     weighted_subjects = set()
     for t in yesterday_todos:
@@ -1500,7 +1503,7 @@ def run_mode_b(today_dt):
     
     # 3. 撈取所有未完成任務並分類
     raw_all_todos = query_database_all(TODO_ACTIVITIES_DB_ID)
-    uncompleted_todos = [t for t in raw_all_todos if not is_task_completed(t)]
+    uncompleted_todos = [t for t in raw_all_todos if not is_task_completed(t) and get_title(t, "名稱") and get_title(t, "名稱").strip() != ""]
     
     sprint_end_dt = today_dt + timedelta(days=2)
     sprint_end_str = sprint_end_dt.strftime("%Y-%m-%d")
@@ -1959,6 +1962,7 @@ def run_mode_b(today_dt):
                 ]
             }
         })
+        yesterday_todos = [t for t in yesterday_todos if get_title(t, "名稱") and get_title(t, "名稱").strip() != ""]
         yesterday_subjects = {get_rich_text(t, "相關科目") for t in yesterday_todos if get_rich_text(t, "相關科目")}
         yesterday_subjects = {sub for sub in yesterday_subjects if sub and sub.lower() != "無"}
         
