@@ -962,41 +962,55 @@ def analyze_activity_brochure_bytes(content, user_instruction=""):
         prompt += f"\n\n請特別注意！使用者給出了以下特定提取指令：\n\"{user_instruction}\"\n請務必依據此指定指令，在簡章中優先找出使用者關心的活動時段或日期，並列在事件列表中。"
         
     prompt += """
-    請僅返回以下 JSON 格式（其中 events 是一個陣列，包含所有找到的事件，至少包含一個主事件。若完全不符身分，請返回空的 events 陣列），不要包含 any markdown 標記：
-    {
-      "events": [
-        {
-          "name": "活動名稱 - 線上初賽",
-          "type": "比賽",
-          "date": "2026-07-07",
-          "note": "初賽將於線上舉行"
-        },
-        {
-          "name": "活動名稱 - 報名截止",
-          "type": "其他",
-          "date": "2026-06-10",
-          "note": "需組隊報名，高中組3人"
-        }
-      ]
-    }
-    """
-    model = genai.GenerativeModel('gemini-3.1-flash-lite')
-    response = model.generate_content([
-        {
-            'mime_type': mime_type,
-            'data': content
-        },
-        prompt
-    ], generation_config={"response_mime_type": "application/json"})
-    return safe_load_json(response.text)
+    請僅返回以下 JSON 格式（其中 events 是一個陣列，包含??    可判定的動作（action）與其對應的提取資料（data）如下：
+    
+    1. action: "add_todo" (新增功課、作業、小考、考試準備等課業學習相關待辦事項)
+       提取 data 欄位：
+       - name (功課/待辦事項名稱或描述，請使用簡短的繁體中文，且不要包含科目名稱，例如「英文閱讀報告」-> name為「閱讀報告」)
+       - subject (相關科目，例如「數學」、「英文」、「物理」等，若無請填 "無")
+       - due_date (截止日期，格式為 YYYY-MM-DD。若無提到請填 "#")
+       - type (類型，必須是以下之一："作業"、"小考"、"段考"、"回條"、"報名表")
+       
+    2. action: "complete_todo" (標記某個待辦事項/功課為已完成)
+       提取 data 欄位：
+       - name (要標記完成的事項關鍵字/名稱)
+       - actual_time (實際耗時，必須是整數數字字串，表示分鐘，例如 "60"。若未提及則填 "#")
+       
+    3. action: "add_activity" (新增一次性活動、比賽、講座、營隊、志工、出遊行程等)
+       提取 data 欄位：
+       - name (活動名稱)
+       - date (活動日期，格式為 YYYY-MM-DD)
+       - type (類型，必須是以下之一："講座"、"營隊"、"比賽"、"志工"、"休閒"、"其他")
+       
+    4. action: "add_expense" (記帳、新增一筆金錢消費/花費記錄)
+       提取 data 欄位：
+       - name (消費項目名稱或商店名稱，例如 "麥當勞"、"7-11 飲料")
+       - amount (消費總金額，必須是整數數字)
+       - category (分類，必須是以下之一："飲食"、"交通"、"娛樂"、"學習")
+       
+    5. action: "generic_todo" (不符合以上，但屬於一般隨手記下的雜事待辦/備忘，例如「清理書桌」)
+       提取 data 欄位：
+       - name (待辦名稱)
+       - date (時間/日期，格式為 YYYY-MM-DD。若無提到請填 "#")
 
-def analyze_calendar_image_bytes(content, today_str):
-    mime_type = get_file_mime_type(content)
-    prompt = f"""
-    請幫我分析這張行事曆、功課表或課表照片，提取其中所有的日常固定課表與一次性日程事件（包括活動、志工、比賽、請假、停課、補課等）。
-    
-    今天日期為：{today_str}（請以此基準年份和日期，正確推算照片中的年月日，格式皆為 YYYY-MM-DD）。
-    
+    【絕對分類與路由規則 (CRITICAL ROUTING RULES)】：
+    1. 記帳與消費優先：凡是訊息涉及「花了多少錢」、「買了」、「費用」、「金額」、「元」、「收據」等與【金錢/消費/花費/購買/記帳】相關的任何敘述，必須路由為 "add_expense"，絕不能分配為作業 "add_todo" 或備忘 "generic_todo"。
+    2. 活動與行程優先：凡是訊息涉及「營隊」、「比賽」、「志工」、「講座」、「聚會」、「演講」、「黑客松」等【一次性活動或日程】，必須路由為 "add_activity"，絕不能分配為學校作業待辦 "add_todo"。
+    3. 功課與小考：僅限於學校的功課、作業、課後練習、複習、小考、段考、家長回條等【學校課業與課後自修待辦】路由為 "add_todo"。
+
+    待解析敘述：
+    "{text_content}"
+
+    請僅返回以下 JSON 格式，不要包含 any markdown 標記（如 ```json 等）：
+    {{
+      "action": "add_todo",
+      "data": {{
+        "name": "作業名稱",
+        "subject": "科目",
+        "due_date": "2026-07-07",
+        "type": "作業"
+      }}
+    }}  
     請仔細分析照片中的每一天，並提取以下兩類資訊：
     
     1. fixed_schedule (重複性的固定課表/作息)：
@@ -1136,34 +1150,39 @@ def route_and_parse_natural_text(text_content, today_str):
     
     可判定的動作（action）與其對應的提取資料（data）如下：
     
-    1. action: "add_todo" (新增功課、作業、小考、考試準備等待辦事項)
+    1. action: "add_todo" (新增功課、作業、小考、考試準備等課業學習相關待辦事項)
        提取 data 欄位：
        - name (功課/待辦事項名稱或描述，請使用簡短的繁體中文，且不要包含科目名稱，例如「英文閱讀報告」-> name為「閱讀報告」)
        - subject (相關科目，例如「數學」、「英文」、「物理」等，若無請填 "無")
        - due_date (截止日期，格式為 YYYY-MM-DD。若無提到請填 "#")
-       - type (類型，必須是以下之一："作業"、"小考"、"段考"、"回條"、"報名表"、"活動")
+       - type (類型，必須是以下之一："作業"、"小考"、"段考"、"回條"、"報名表")
        
     2. action: "complete_todo" (標記某個待辦事項/功課為已完成)
        提取 data 欄位：
        - name (要標記完成的事項關鍵字/名稱)
        - actual_time (實際耗時，必須是整數數字字串，表示分鐘，例如 "60"。若未提及則填 "#")
        
-    3. action: "add_activity" (新增一次性活動、比賽、講座、營隊等)
+    3. action: "add_activity" (新增一次性活動、比賽、講座、營隊、志工、出遊行程等)
        提取 data 欄位：
        - name (活動名稱)
        - date (活動日期，格式為 YYYY-MM-DD)
        - type (類型，必須是以下之一："講座"、"營隊"、"比賽"、"志工"、"休閒"、"其他")
        
-    4. action: "add_expense" (記帳、新增一筆消費記錄)
+    4. action: "add_expense" (記帳、新增一筆金錢消費/花費記錄)
        提取 data 欄位：
        - name (消費項目名稱或商店名稱，例如 "麥當勞"、"7-11 飲料")
        - amount (消費總金額，必須是整數數字)
        - category (分類，必須是以下之一："飲食"、"交通"、"娛樂"、"學習")
        
-    5. action: "generic_todo" (不符合以上，但屬於一般隨手記下的待辦/備忘)
+    5. action: "generic_todo" (不符合以上，但屬於一般隨手記下的雜事待辦/備忘，例如「清理書桌」)
        提取 data 欄位：
        - name (待辦名稱)
        - date (時間/日期，格式為 YYYY-MM-DD。若無提到請填 "#")
+
+    【絕對分類與路由規則 (CRITICAL ROUTING RULES)】：
+    1. 記帳與消費優先：凡是訊息涉及「花了多少錢」、「買了」、「費用」、「金額」、「元」、「收據」等與【金錢/消費/花費/購買/記帳】相關的任何敘述，必須路由為 "add_expense"，絕不能分配為作業 "add_todo" 或備忘 "generic_todo"。
+    2. 活動與行程優先：凡是訊息涉及「營隊」、「比賽」、「志工」、「講座」、「聚會」、「演講」、「黑客松」等【一次性活動或日程】，必須路由為 "add_activity"，絕不能分配為學校作業待辦 "add_todo"。
+    3. 功課與小考：僅限於學校的功課、作業、課後練習、複習、小考、段考、家長回條等【學校課業與課後自修待辦】路由為 "add_todo"。
 
     待解析敘述：
     "{text_content}"
