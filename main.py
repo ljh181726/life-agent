@@ -1011,6 +1011,18 @@ def analyze_calendar_image_bytes(content, today_str):
        - start (開始時間，格式如 "08:30" 或 "18:30")
        - end (結束時間，格式如 "12:00" 或 "21:30")
        - type (行程類型，必須是以下五個之一："上課"、"自習寫功課"、"考試準備"、"段考複習"、"休息"。請注意：請假/停課/休息日的 type 請填 "休息"，上課與補課/活動/志工的 type 請填 "上課")
+       
+       【節次與起訖時間換算說明】：
+       如果在資料中看到「第X節課」、「X-Y節」、「X節」或「X-Y節」（如 1-2節、34節、3-4節、12節），請自動依據雄中課堂時間對照表進行換算：
+       - 第 1 節課: 08:10-09:00
+       - 第 2 節課: 09:10-10:00
+       - 第 3 節課: 10:20-11:10
+       - 第 4 節課: 11:20-12:10
+       - 第 5 節課: 13:20-14:10
+       - 第 6 節課: 14:20-15:10
+       - 第 7 節課: 15:20-16:10
+       - 第 8 節課: 16:20-17:10
+       例如「12節」或「1-2節」即為 08:10-10:00；「34節」或「3-4節」即為 10:20-12:10。
 
     請僅返回以下 JSON 格式，不要包含任何 markdown 標記（如 ```json 等）：
     {{
@@ -1070,6 +1082,18 @@ def analyze_calendar_text(text_content, today_str):
        - start (開始時間，格式如 "08:30" 或 "18:30")
        - end (結束時間，格式如 "12:00" 或 "21:30")
        - type (行程類型，必須是以下五個之一："上課"、"自習寫功課"、"考試準備"、"段考複習"、"休息"。請注意：請假/停課/休息日的 type 請填 "休息"，上課與補課/活動/志工的 type 請填 "上課")
+       
+       【節次與起訖時間換算說明】：
+       如果在資料中看到「第X節課」、「X-Y節」、「X節」或「X-Y節」（如 1-2節、34節、3-4節、12節），請自動依據雄中課堂時間對照表進行換算：
+       - 第 1 節課: 08:10-09:00
+       - 第 2 節課: 09:10-10:00
+       - 第 3 節課: 10:20-11:10
+       - 第 4 節課: 11:20-12:10
+       - 第 5 節課: 13:20-14:10
+       - 第 6 節課: 14:20-15:10
+       - 第 7 節課: 15:20-16:10
+       - 第 8 節課: 16:20-17:10
+       例如「12節」或「1-2節」即為 08:10-10:00；「34節」或「3-4節」即為 10:20-12:10。
 
     待解析敘述：
     "{text_content}"
@@ -1588,6 +1612,10 @@ def run_mode_b(today_dt):
     # 分類：區分自動建立的（待清除）與使用者建立的（保留並視為固定行程）
     bot_event_ids_to_delete = []
     today_fixed_subject_names = {get_title(s, "科目名稱") for s in today_fixed_schedules if get_title(s, "科目名稱")}
+    
+    class_overrides = []
+    other_fixed_events = []
+    
     for row in existing_events:
         created_by_id = row.get("created_by", {}).get("id")
         name = get_title(row, "行程名稱")
@@ -1621,17 +1649,21 @@ def run_mode_b(today_dt):
                     if ":" in start_time_str and ":" in end_time_str:
                         sh, sm = map(int, start_time_str.split(":"))
                         eh, em = map(int, end_time_str.split(":"))
-                        fixed_events.append({
+                        ev = {
                             "name": name,
                             "start": sh * 60 + sm,
                             "end": eh * 60 + em,
                             "type": get_select(row, "行程類型") or "上課",
                             "is_user_event": True
-                        })
+                        }
+                        if get_subject_budget(name) > 0:
+                            class_overrides.append(ev)
+                        else:
+                            other_fixed_events.append(ev)
                         print(f"偵測到保留行程/一次性事件，已視為固定行程: {start_time_str}-{end_time_str} {name}")
                 except Exception as e:
                     print(f"解析保留行程時間失敗 [{name}]: {e}")
-    db_fixed_events = []
+                    
     for s in today_fixed_schedules:
         time_range = get_rich_text(s, "時間段")
         name = get_title(s, "科目名稱")
@@ -1659,12 +1691,16 @@ def run_mode_b(today_dt):
                 start_s, end_s = time_range.strip().split("-")
                 sh, sm = map(int, start_s.split(":"))
                 eh, em = map(int, end_s.split(":"))
-                db_fixed_events.append({
+                ev = {
                     "name": name,
                     "start": sh * 60 + sm,
                     "end": eh * 60 + em,
                     "type": "上課"
-                })
+                }
+                if get_subject_budget(name) > 0:
+                    class_overrides.append(ev)
+                else:
+                    other_fixed_events.append(ev)
             except Exception as e:
                 print(f"解析課表時間段失敗 [{time_range}]: {e}")
 
@@ -1695,28 +1731,32 @@ def run_mode_b(today_dt):
                 {"name": "第 8 節課", "start": 16 * 60 + 20, "end": 17 * 60 + 10, "type": "上課", "period": 8}
             ])
             
-        # 進行合併：如果某個預設節次與來自 Notion 資料庫中的固定課表重疊，我們將其重新命名為該科目的名稱
+        # 進行合併：如果某個預設節次與 class_overrides 重疊，優先使用 class_overrides 的名稱
         for dp in default_periods:
-            for db_ev in db_fixed_events:
-                overlap = max(dp["start"], db_ev["start"]) < min(dp["end"], db_ev["end"])
+            for ov in class_overrides:
+                overlap = max(dp["start"], ov["start"]) < min(dp["end"], ov["end"])
                 if overlap:
-                    dp["name"] = db_ev["name"]
+                    dp["name"] = ov["name"]
                     
-        # 將合併後的課表加入到 fixed_events
+        # 將平日節次加入
         fixed_events.extend(default_periods)
         
-        # 處理資料庫中不重疊於平日預設課表的其他行程（例如晚上 PC化學 / MEC 等）
-        for db_ev in db_fixed_events:
+        # 處理不重疊於平日白天節次的其他課程（如晚上課程）
+        for ov in class_overrides:
             has_overlap = False
             for dp in default_periods:
-                if max(dp["start"], db_ev["start"]) < min(dp["end"], db_ev["end"]):
+                if max(dp["start"], ov["start"]) < min(dp["end"], ov["end"]):
                     has_overlap = True
                     break
             if not has_overlap:
-                fixed_events.append(db_ev)
+                fixed_events.append(ov)
+                
+        # 處理其他非課程固定行程（如志工等）
+        fixed_events.extend(other_fixed_events)
     else:
-        # 周末：直接加入所有資料庫行程
-        fixed_events.extend(db_fixed_events)
+        # 周末：直接加入所有行程
+        fixed_events.extend(class_overrides)
+        fixed_events.extend(other_fixed_events)
 
     # 讀取今天活動資料庫中的活動，並作為固定行程（Busy Blocks）避開 (預設 09:00 - 17:00)
     if ACTIVITIES_DB_ID:
