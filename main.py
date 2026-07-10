@@ -1669,10 +1669,11 @@ def run_mode_b(today_dt):
         name = get_title(s, "科目名稱")
         
         # 1. 暑輔日期區間限制 (2026-07-13 至 2026-08-07)
-        if name == "暑輔":
+        vac_type = get_select(s, "作息類型")
+        if vac_type == "暑假":
             curr_date = today_dt.date()
             if not (date(2026, 7, 13) <= curr_date <= date(2026, 8, 7)):
-                print(f"今日 ({curr_date}) 不在暑輔期間 (7/13 - 8/7)，跳過固定行程 暑輔。")
+                print(f"今日 ({curr_date}) 不在暑輔期間 (7/13 - 8/7)，跳過暑假固定行程 [{name}]。")
                 continue
                 
         # 2. 請假/停課/休息判定
