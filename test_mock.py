@@ -255,6 +255,58 @@ def mock_send_telegram_message(message):
     print(message)
     print("============================================\n")
 
+# ==================== MOCKING Google Calendar API ====================
+
+class MockResponse:
+    def __init__(self, json_data, status_code):
+        self.json_data = json_data
+        self.status_code = status_code
+    def json(self):
+        return self.json_data
+
+mock_gcal_events = []
+
+def mock_make_gcal_request(method, url, headers=None, **kwargs):
+    global mock_gcal_events
+    if method == "GET":
+        if "/events" in url:
+            return MockResponse({"items": mock_gcal_events}, 200)
+    elif method == "POST":
+        if "/events" in url:
+            json_body = kwargs.get("json", {})
+            summary = json_body.get("summary")
+            start = json_body.get("start", {}).get("dateTime")
+            end = json_body.get("end", {}).get("dateTime")
+            color_id = json_body.get("colorId")
+            ext_props = json_body.get("extendedProperties", {})
+            
+            new_event = {
+                "id": f"gcal_event_{len(mock_gcal_events) + 1}",
+                "summary": summary,
+                "description": json_body.get("description", ""),
+                "start": json_body.get("start"),
+                "end": json_body.get("end"),
+                "colorId": color_id,
+                "extendedProperties": ext_props
+            }
+            mock_gcal_events.append(new_event)
+            print(f"[Google Calendar Mock API] 已建立行程: {start[11:16]}-{end[11:16]} [{color_id}] {summary}")
+            return MockResponse(new_event, 200)
+    elif method == "DELETE":
+        parts = url.split("/")
+        event_id = parts[-1]
+        mock_gcal_events = [x for x in mock_gcal_events if x.get("id") != event_id]
+        print(f"[Google Calendar Mock API] 已刪除行程 ID: {event_id}")
+        return MockResponse({}, 204)
+        
+    return MockResponse({}, 404)
+
+def mock_delete_google_calendar_event(access_token, calendar_id, event_id):
+    global mock_gcal_events
+    mock_gcal_events = [x for x in mock_gcal_events if x.get("id") != event_id]
+    print(f"[Google Calendar Mock API] 已刪除行程 ID: {event_id}")
+    return True
+
 # 替換 main.py 中的 API 函數為 Mock 函數
 main.FIXED_SCHEDULE_DB_ID = "mock_fixed_schedule_db"
 main.TODO_ACTIVITIES_DB_ID = "mock_todo_activities_db"
@@ -274,6 +326,11 @@ main.send_telegram_message = mock_send_telegram_message
 main.get_bot_user_id = lambda: "mock_bot_user_id"
 main.ACTIVITIES_DB_ID = "mock_activities_db"
 main.process_telegram_commands = lambda today_dt: print("[Telegram Mock] 執行指令處理 (跳過實體 API)...")
+
+# Google Calendar Mocks
+main.get_google_calendar_access_token = lambda: "mock_access_token"
+main.make_gcal_request = mock_make_gcal_request
+main.delete_google_calendar_event = mock_delete_google_calendar_event
 
 # ==================== 執行測試 ====================
 

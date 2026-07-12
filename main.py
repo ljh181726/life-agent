@@ -3,11 +3,97 @@ import sys
 import requests
 import json
 import io
+import time
 import pytz
 from datetime import datetime, timedelta, date
 from PIL import Image
 import google.generativeai as genai
 import re
+
+TOKEN_CACHE_FILE = "d:/antigravity/life-agent/.gcal_token_cache.json"
+
+def get_google_calendar_access_token():
+    if os.path.exists(TOKEN_CACHE_FILE):
+        try:
+            with open(TOKEN_CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            if cache.get("expires_at", 0) > time.time() + 300:
+                return cache.get("access_token")
+        except Exception as e:
+            print(f"讀取 Token 快取失敗: {e}")
+            
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    refresh_token = os.environ.get("GOOGLE_REFRESH_TOKEN")
+    
+    if not client_id or not client_secret or not refresh_token:
+        print("未完整設定 GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET 或 GOOGLE_REFRESH_TOKEN，將跳過 Google Calendar。")
+        return None
+        
+    url = "https://oauth2.googleapis.com/token"
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token"
+    }
+    try:
+        res = requests.post(url, data=payload)
+        res.raise_for_status()
+        res_json = res.json()
+        access_token = res_json.get("access_token")
+        expires_in = res_json.get("expires_in", 3600)
+        
+        cache_data = {
+            "access_token": access_token,
+            "expires_at": time.time() + expires_in
+        }
+        with open(TOKEN_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f)
+            
+        print("已重新整理並快取 Google Calendar access token。")
+        return access_token
+    except Exception as e:
+        print(f"更新 Google Calendar access token 失敗: {e}")
+        return None
+
+def make_gcal_request(method, url, headers=None, **kwargs):
+    if headers is None:
+        headers = {}
+        
+    token = get_google_calendar_access_token()
+    if not token:
+        return None
+        
+    headers["Authorization"] = f"Bearer {token}"
+    
+    try:
+        res = requests.request(method, url, headers=headers, **kwargs)
+        if res.status_code in [400, 401]:
+            print(f"Google Calendar API 回傳 {res.status_code}，嘗試清除快取並重新整理 Token...")
+            if os.path.exists(TOKEN_CACHE_FILE):
+                try:
+                    os.remove(TOKEN_CACHE_FILE)
+                except:
+                    pass
+            token = get_google_calendar_access_token()
+            if not token:
+                return res
+            headers["Authorization"] = f"Bearer {token}"
+            res = requests.request(method, url, headers=headers, **kwargs)
+        return res
+    except Exception as e:
+        print(f"Google Calendar HTTP 請求失敗: {e}")
+        return None
+
+def delete_google_calendar_event(access_token, calendar_id, event_id):
+    url = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/{event_id}"
+    try:
+        res = make_gcal_request("DELETE", url)
+        return res and res.status_code == 204
+    except Exception as e:
+        print(f"刪除 Google Calendar 事件失敗 {event_id}: {e}")
+        return False
 
 def safe_load_json(text):
     if not text:
@@ -793,40 +879,75 @@ def process_telegram_commands(today_dt):
                                 })
                                 fixed_added += 1
                                 
-                    # 2. 寫入一次性行程與請假/補課
-                    # 為了避免在同個日期重複，我們先按日期分組，將有新日程的那些日期上原本由 Bot 建立的日程清空
-                    dates_to_clear = {e.get("date") for e in events_list if e.get("date")}
-                    for d in dates_to_clear:
-                        clear_query = {
-                            "filter": {
-                                "and": [
-                                    {"property": "日期", "date": {"equals": d}}
-                                ]
+                    # 2. 寫入一次性行程與請假/補課 to Google Calendar
+                    access_token = get_google_calendar_access_token()
+                    if not access_token:
+                        print("無法取得 Google Calendar Access Token，跳過匯入。")
+                    else:
+                        calendar_id = os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
+                        dates_to_clear = {e.get("date") for e in events_list if e.get("date")}
+                        for d in dates_to_clear:
+                            time_min = f"{d}T00:00:00+08:00"
+                            time_max = f"{d}T23:59:59+08:00"
+                            url_list = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+                            params = {
+                                "timeMin": time_min,
+                                "timeMax": time_max,
+                                "singleEvents": "true"
                             }
-                        }
-                        day_events = query_database_all(WEEKLY_CALENDAR_DB_ID, clear_query)
-                        bot_user_id = get_bot_user_id()
-                        for ev in day_events:
-                            created_by_id = ev.get("created_by", {}).get("id")
-                            if bot_user_id and created_by_id == bot_user_id:
-                                delete_page(ev["id"])
+                            res_list = make_gcal_request("GET", url_list, params=params)
+                            if res_list and res_list.status_code == 200:
+                                day_events = res_list.json().get("items", [])
+                                for ev_gcal in day_events:
+                                    description = ev_gcal.get("description") or ""
+                                    is_bot = (
+                                        ev_gcal.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent" or
+                                        "[Life-Agent 自動生成]" in description
+                                    )
+                                    if is_bot:
+                                        delete_google_calendar_event(access_token, calendar_id, ev_gcal["id"])
+                                        
+                        for ev in events_list:
+                            ev_date = ev.get("date")
+                            ev_name = ev.get("name")
+                            ev_start = ev.get("start")
+                            ev_end = ev.get("end")
+                            ev_type = ev.get("type") or "上課"
+                            if ev_date and ev_name and ev_start and ev_end:
+                                start_iso = f"{ev_date}T{ev_start}:00+08:00"
+                                end_iso = f"{ev_date}T{ev_end}:00+08:00"
                                 
-                    # 寫入新日程
-                    for ev in events_list:
-                        ev_date = ev.get("date")
-                        ev_name = ev.get("name")
-                        ev_start = ev.get("start")
-                        ev_end = ev.get("end")
-                        ev_type = ev.get("type") or "上課"
-                        if ev_date and ev_name and ev_start and ev_end:
-                            create_page(WEEKLY_CALENDAR_DB_ID, {
-                                "行程名稱": {"title": [{"text": {"content": ev_name}}]},
-                                "日期": {"date": {"start": ev_date}},
-                                "開始時間": {"rich_text": [{"text": {"content": ev_start}}]},
-                                "結束時間": {"rich_text": [{"text": {"content": ev_end}}]},
-                                "行程類型": {"select": {"name": ev_type}}
-                            })
-                            events_added += 1
+                                color_id = "9"
+                                if ev_type in ["自習寫功課", "段考複習", "考試準備"]:
+                                    color_id = "10"
+                                    
+                                url_create = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+                                payload = {
+                                    "summary": ev_name,
+                                    "description": "[Life-Agent 自動生成]\n由 Telegram 指令自動匯入",
+                                    "start": {
+                                        "dateTime": start_iso,
+                                        "timeZone": "Asia/Taipei"
+                                    },
+                                    "end": {
+                                        "dateTime": end_iso,
+                                        "timeZone": "Asia/Taipei"
+                                    },
+                                    "colorId": color_id,
+                                    "extendedProperties": {
+                                        "private": {
+                                            "source": "life-agent"
+                                        }
+                                    }
+                                }
+                                try:
+                                    res_create = make_gcal_request("POST", url_create, json=payload)
+                                    if res_create and res_create.status_code == 200:
+                                        events_added += 1
+                                    else:
+                                        print(f"匯入 Google Calendar 事件失敗: {res_create.status_code if res_create else 'No Response'}")
+                                except Exception as e:
+                                    print(f"匯入 Google Calendar 異常: {e}")
                             
                     send_telegram_message(f"成功匯入日程！\n- 新增固定課表：{fixed_added} 筆\n- 規劃行事曆事件：{events_added} 筆")
         except Exception as proc_err:
@@ -1345,59 +1466,8 @@ def run_mode_a(today_dt):
         except Exception as e:
             print(f"讀取未處理活動失敗: {e}")
 
-    # 2. 書包物品精準檢查
-    # 2.1 撈取明天所需物品與科目
-    tomorrow_vacation = is_vacation(tomorrow_dt)
-    tomorrow_vacation_type = "暑假" if tomorrow_vacation else "學期中"
-    
-    # 撈取明天課表
-    schedule_filter = {
-        "filter": {
-            "and": [
-                {"property": "星期", "number": {"equals": tomorrow_w}},
-                {"property": "作息類型", "select": {"equals": tomorrow_vacation_type}}
-            ]
-        }
-    }
-    tomorrow_schedules = query_database_all(FIXED_SCHEDULE_DB_ID, schedule_filter)
-    tomorrow_subjects = {get_title(s, "科目名稱") for s in tomorrow_schedules if get_title(s, "科目名稱")}
-    
-    # 撈取明天截止或明天要考試的待辦
-    todo_tomorrow_filter = {
-        "filter": {
-            "and": [
-                {"property": "截止或考試日期", "date": {"equals": tomorrow_str}}
-            ]
-        }
-    }
-    tomorrow_todos = query_database_all(TODO_ACTIVITIES_DB_ID, todo_tomorrow_filter)
-    
-    # 建立明天要帶去學校的物品清單 (無 emoji 標記)
-    tomorrow_required_items = {} # {物品/科目: 標籤}
-    
-    # 固定課表需要的科目為一般重要
-    for sub in tomorrow_subjects:
-        tomorrow_required_items[sub] = "課堂課本"
-        
-    for t in tomorrow_todos:
-        t_name = get_title(t, "名稱")
-        if not t_name or t_name.strip() == "":
-            continue
-        sub = get_rich_text(t, "相關科目")
-        t_type = get_select(t, "類型")
-        
-        label = "明天作業"
-        if t_type in ["回條", "報名表"]:
-            label = "重要回條"
-        elif t_type in ["小考", "段考"]:
-            label = "考試科目"
-            
-        if sub and sub.lower() != "無":
-            tomorrow_required_items[sub] = label
-        else:
-            tomorrow_required_items[t_name] = label
-
-    # 2.2 預覽今晚至未來三天內讀書/作業所需之課本 (包含已逾期、未來3天內截止、或沒有設定截止日期的所有未完成任務科目)
+        # 2. 書包物品精準檢查：計算今天放學要帶回的物品
+    # 預覽今晚至未來三天內讀書/作業所需之課本 (包含已逾期、未來3天內截止、或沒有設定截止日期的所有未完成任務科目)
     preview_end_dt = today_dt + timedelta(days=2)
     preview_end_str = preview_end_dt.strftime("%Y-%m-%d")
     
@@ -1417,7 +1487,7 @@ def run_mode_a(today_dt):
                     lbl = "衝刺準備"
                 future_study_subjects[sub] = f"{lbl} ({t_name[:12]})"
 
-    # 2.3 讀取教科書位置追蹤庫
+    # 讀取教科書位置追蹤庫
     tracker_results = query_database_all(BOOK_TRACKER_DB_ID)
     location_tracker = {} # {物品名稱: (目前位置, page_id)}
     for r in tracker_results:
@@ -1426,22 +1496,7 @@ def run_mode_a(today_dt):
         if name:
             location_tracker[name] = (loc, r["id"])
 
-    # 2.4 計算明天出門要帶去的物品 (狀態在學校 -> 忽略；狀態在家裡 -> 要帶)
-    bring_to_school = [] # list of tuples: (item, label)
-    for item, label in tomorrow_required_items.items():
-        if item in location_tracker:
-            loc, page_id = location_tracker[item]
-            if loc == "在家裡":
-                bring_to_school.append((item, label))
-        else:
-            # 追蹤庫中沒有的物品，預設新增且預設在家裡 (以便之後提示需要帶去)
-            bring_to_school.append((item, label))
-            create_page(BOOK_TRACKER_DB_ID, {
-                "科目/物品名稱": {"title": [{"text": {"content": item}}]},
-                "目前位置": {"select": {"name": "在家裡"}}
-            })
-
-    # 2.5 計算今天放學要帶回的物品 (狀態在家裡 -> 忽略；狀態在學校 -> 要帶回)
+    # 計算今天放學要帶回的物品 (狀態在家裡 -> 忽略；狀態在學校 -> 要帶回)
     take_home = [] # list of tuples: (item, label)
     for item, label in future_study_subjects.items():
         if item in location_tracker:
@@ -1456,38 +1511,9 @@ def run_mode_a(today_dt):
                 "目前位置": {"select": {"name": "在學校"}}
             })
 
-    # 2.6 將兩個清單寫入明天 (tomorrow) Notion 行事曆的「今日攜帶清單」
-    bring_to_school.sort(key=lambda x: x[0])
     take_home.sort(key=lambda x: x[0])
-    bring_to_school_str = "\n".join([f"- {x[0]} ({x[1]})" for x in bring_to_school]) if bring_to_school else "無"
-    take_home_str = "\n".join([f"- {x[0]} ({x[1]})" for x in take_home]) if take_home else "無"
-    
-    carry_note = f"【明早出門必帶】：\n{bring_to_school_str}\n\n【放學必帶回家】：\n{take_home_str}"
-    
-    # 尋找明天是否已有備忘 Page (無 emoji 標題)
-    memo_title = "【攜帶備忘】明天出門與今日放學物品"
-    memo_filter = {
-        "filter": {
-            "and": [
-                {"property": "行程名稱", "title": {"equals": memo_title}},
-                {"property": "日期", "date": {"equals": tomorrow_str}}
-            ]
-        }
-    }
-    existing_memos = query_database_all(WEEKLY_CALENDAR_DB_ID, memo_filter)
-    if existing_memos:
-        update_page(existing_memos[0]["id"], {
-            "今日攜帶清單": {"rich_text": [{"text": {"content": carry_note}}]}
-        })
-    else:
-        create_page(WEEKLY_CALENDAR_DB_ID, {
-            "行程名稱": {"title": [{"text": {"content": memo_title}}]},
-            "日期": {"date": {"start": tomorrow_str}},
-            "行程類型": {"select": {"name": "休息"}},
-            "今日攜帶清單": {"rich_text": [{"text": {"content": carry_note}}]}
-        })
 
-    # 3. 記帳統計與 LINE 發送
+    # 3. 記帳統計與 Telegram 發送
     today_ledger_filter = {
         "filter": {
             "and": [
@@ -1498,24 +1524,27 @@ def run_mode_a(today_dt):
     today_ledgers = query_database_all(LEDGER_DB_ID, today_ledger_filter)
     total_spend = sum([get_number(x, "金額") or 0 for x in today_ledgers])
 
-    # 組裝 Telegram 訊息 (移除 emoji 標註與理財提醒)
-    telegram_msg = f"""
-【Life-Agent 傍晚通知 - 書包檢查與記帳】
+    # 組裝 Telegram 訊息
+    if take_home:
+        take_home_section = "\n".join([f"  [ ] {x[0]} ({x[1]})" for x in take_home])
+    else:
+        take_home_section = "  今天放學無須帶任何書本回家。"
 
-[明早出門必帶去學校！]
---------------------------------
-{chr(10).join([f'  [ ] {x[0]} ({x[1]})' for x in bring_to_school]) if bring_to_school else '  [x] 沒有特別需要帶的'}
---------------------------------
+    if total_spend > 0:
+        expense_section = f"- 總計花費：{total_spend} 元"
+    else:
+        expense_section = "- 今日無任何消費記帳。"
+
+    telegram_msg = f"""【Life-Agent 傍晚通知 - 書包檢查與記帳】
 
 [今天放學必帶回包包！]
 --------------------------------
-{chr(10).join([f'  [ ] {x[0]} ({x[1]})' for x in take_home]) if take_home else '  [x] 沒有需要特別帶回家的'}
+{take_home_section}
 --------------------------------
 (帶回家的課本將供今晚與未來幾天的學習排程使用)
 
 [今日消費統計]
-- 總計花費：{total_spend} 元
-"""
+{expense_section}"""
     send_telegram_message(telegram_msg)
 
 # ==================== 核心邏輯 B：半夜 12:00 執行 ====================
@@ -1609,79 +1638,99 @@ def run_mode_b(today_dt):
         available_blocks.append((19 * 60, 21 * 60 + 30)) # 19:00 - 21:30
 
     fixed_events = []
-    bot_user_id = get_bot_user_id()
-    print(f"當前 Bot User ID: {bot_user_id}")
-
-    # 讀取今天行事曆中的現有事件，保留使用者手動建立的，並作為固定行程（Busy Blocks）避開
-    today_calendar_filter = {
-        "filter": {
-            "and": [
-                {"property": "日期", "date": {"equals": today_str}},
-                {"property": "行程名稱", "title": {"does_not_contain": "攜帶備忘"}}
-            ]
-        }
-    }
-    existing_events = []
-    if WEEKLY_CALENDAR_DB_ID:
-        try:
-            existing_events = query_database_all(WEEKLY_CALENDAR_DB_ID, today_calendar_filter)
-        except Exception as e:
-            print(f"讀取今日行事曆失敗: {e}")
-
-    # 分類：區分自動建立的（待清除）與使用者建立的（保留並視為固定行程）
-    bot_event_ids_to_delete = []
-    today_fixed_subject_names = {get_title(s, "科目名稱") for s in today_fixed_schedules if get_title(s, "科目名稱")}
     
+    access_token = get_google_calendar_access_token()
+    if not access_token:
+        print("無法取得 Google Calendar Access Token，終止時間分配。")
+        return
+        
+    calendar_id = os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
+    
+    # 查詢今日 Google Calendar 事件
+    time_min = f"{today_str}T00:00:00+08:00"
+    time_max = f"{today_str}T23:59:59+08:00"
+    
+    url_list = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+    params = {
+        "timeMin": time_min,
+        "timeMax": time_max,
+        "singleEvents": "true",
+        "orderBy": "startTime"
+    }
+    
+    existing_events = []
+    res_list = make_gcal_request("GET", url_list, params=params)
+    if res_list and res_list.status_code == 200:
+        existing_events = res_list.json().get("items", [])
+    else:
+        print(f"取得 Google Calendar 行程失敗: {res_list.status_code if res_list else 'No Response'}")
+
+    bot_event_ids_to_delete = []
     class_overrides = []
     other_fixed_events = []
     
-    for row in existing_events:
-        created_by_id = row.get("created_by", {}).get("id")
-        name = get_title(row, "行程名稱")
+    for event in existing_events:
+        event_id = event["id"]
+        name = event.get("summary") or "無標題行程"
+        description = event.get("description") or ""
         
-        # 判斷是否為自動產生的自習/休息塊或重複性課表項目
-        is_bot_generated_block = (
-            name in ["自由休息與放鬆", "番茄鐘伸展休息"] or
-            name.startswith("衝刺：") or
-            name.startswith("提早準備：") or
-            name.startswith("今日待辦：") or
-            name in today_fixed_subject_names
+        # 判斷是否為機器人自動生成
+        is_bot = (
+            event.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent" or
+            "[Life-Agent 自動生成]" in description
         )
         
-        if bot_user_id and created_by_id == bot_user_id and is_bot_generated_block:
-            # 這是機器人自動生成的，需要刪除重建
-            bot_event_ids_to_delete.append(row["id"])
+        if is_bot:
+            bot_event_ids_to_delete.append(event_id)
         else:
-            # 這是使用者手動加入的，或是腳本匯入的一次性行程/請假，保留
-            # 如果是請假/停課/休息，不作為忙碌區塊（Fixed Busy Blocks）避開，以便釋放時間進行安排
             is_cancellation = ("請假" in name or "停課" in name or "休息!" in name or "(休息!)" in name)
             if is_cancellation:
-                print(f"偵測到請假/停課標記行程 [{name}]，不將其視為忙碌區塊以釋放時間。")
+                print(f"偵測到請假/停課標記行程 [{name}]，不將其視為忙碌區塊。")
                 continue
                 
-            start_time_str = get_rich_text(row, "開始時間")
-            end_time_str = get_rich_text(row, "結束時間")
-            if start_time_str and end_time_str:
+            start_data = event.get("start", {})
+            end_data = event.get("end", {})
+            
+            if "date" in start_data:
+                # 全天事件
+                ev = {
+                    "name": name,
+                    "start": 9 * 60,
+                    "end": 17 * 60,
+                    "type": "上課",
+                    "is_user_event": True
+                }
+                other_fixed_events.append(ev)
+            elif "dateTime" in start_data:
                 try:
-                    start_time_str = start_time_str.strip()
-                    end_time_str = end_time_str.strip()
-                    if ":" in start_time_str and ":" in end_time_str:
-                        sh, sm = map(int, start_time_str.split(":"))
-                        eh, em = map(int, end_time_str.split(":"))
-                        ev = {
-                            "name": name,
-                            "start": sh * 60 + sm,
-                            "end": eh * 60 + em,
-                            "type": get_select(row, "行程類型") or "上課",
-                            "is_user_event": True
-                        }
-                        if get_subject_budget(name) > 0:
-                            class_overrides.append(ev)
-                        else:
-                            other_fixed_events.append(ev)
-                        print(f"偵測到保留行程/一次性事件，已視為固定行程: {start_time_str}-{end_time_str} {name}")
+                    dt_start = datetime.fromisoformat(start_data["dateTime"])
+                    dt_end = datetime.fromisoformat(end_data["dateTime"])
+                    
+                    if dt_start.date() < today_dt.date():
+                        sh, sm = 0, 0
+                    else:
+                        sh, sm = dt_start.hour, dt_start.minute
+                        
+                    if dt_end.date() > today_dt.date():
+                        eh, em = 24, 0
+                    else:
+                        eh, em = dt_end.hour, dt_end.minute
+                        
+                    ev = {
+                        "name": name,
+                        "start": sh * 60 + sm,
+                        "end": eh * 60 + em,
+                        "type": "上課",
+                        "is_user_event": True
+                    }
+                    
+                    if get_subject_budget(name) > 0:
+                        class_overrides.append(ev)
+                    else:
+                        other_fixed_events.append(ev)
+                    print(f"偵測到 Google Calendar 保留行程: {sh:02d}:{sm:02d}-{eh:02d}:{em:02d} {name}")
                 except Exception as e:
-                    print(f"解析保留行程時間失敗 [{name}]: {e}")
+                    print(f"解析 Google Calendar 事件時間失敗 [{name}]: {e}")
                     
     for s in today_fixed_schedules:
         time_range = get_rich_text(s, "時間段")
@@ -1698,7 +1747,7 @@ def run_mode_b(today_dt):
         # 2. 請假/停課/休息判定
         is_canceled = False
         for ex in existing_events:
-            ex_title = get_title(ex, "行程名稱")
+            ex_title = ex.get("summary") or ""
             if name in ex_title and ("請假" in ex_title or "停課" in ex_title or "休息" in ex_title):
                 is_canceled = True
                 print(f"今日課程 [{name}] 在行事曆中被標記為 {ex_title}，已跳過固定行程。")
@@ -2120,32 +2169,58 @@ def run_mode_b(today_dt):
 
     planned_events.sort(key=lambda x: (x["start"], x["end"]))
 
-    # 5. 批次寫回 Notion
-    # 僅刪除屬於機器人自動生成的現有事件
-    for page_id in bot_event_ids_to_delete:
-        delete_page(page_id)
-    print(f"已清除今日自動生成行程共 {len(bot_event_ids_to_delete)} 筆。")
+    # 5. 批次寫回 Google Calendar
+    for event_id in bot_event_ids_to_delete:
+        delete_google_calendar_event(access_token, calendar_id, event_id)
+    print(f"已清除 Google Calendar 今日自動生成行程共 {len(bot_event_ids_to_delete)} 筆。")
 
     for event in planned_events:
         if event.get("is_user_event"):
-            # 使用者手動建立的行程原本就存在於 Notion 中，不重複寫入！
             continue
             
         sh, sm = divmod(event["start"], 60)
         eh, em = divmod(event["end"], 60)
-        start_str = f"{sh:02d}:{sm:02d}"
-        end_str = f"{eh:02d}:{em:02d}"
+        start_iso = f"{today_str}T{sh:02d}:{sm:02d}:00+08:00"
+        end_iso = f"{today_str}T{eh:02d}:{em:02d}:00+08:00"
         
-        properties = {
-            "行程名稱": {"title": [{"text": {"content": event["name"]}}]},
-            "日期": {"date": {"start": today_str}},
-            "開始時間": {"rich_text": [{"text": {"content": start_str}}]},
-            "結束時間": {"rich_text": [{"text": {"content": end_str}}]},
-            "行程類型": {"select": {"name": event["type"]}},
-            "備註": {"rich_text": [{"text": {"content": event["note"]}}]}
+        c_type = event["type"]
+        color_id = "5"
+        if c_type == "上課":
+            color_id = "9"
+        elif c_type in ["自習寫功課", "段考複習", "考試準備"]:
+            color_id = "10"
+            
+        desc = "[Life-Agent 自動生成]"
+        if event.get("note"):
+            desc += f"\n備註：{event['note']}"
+            
+        url_create = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+        payload = {
+            "summary": event["name"],
+            "description": desc,
+            "start": {
+                "dateTime": start_iso,
+                "timeZone": "Asia/Taipei"
+            },
+            "end": {
+                "dateTime": end_iso,
+                "timeZone": "Asia/Taipei"
+            },
+            "colorId": color_id,
+            "extendedProperties": {
+                "private": {
+                    "source": "life-agent"
+                }
+            }
         }
-        create_page(WEEKLY_CALENDAR_DB_ID, properties)
-        print(f"已寫入行程: {start_str}-{end_str} [{event['type']}] {event['name']}")
+        try:
+            res = make_gcal_request("POST", url_create, json=payload)
+            if res and res.status_code == 200:
+                print(f"已寫入 Google Calendar 行程: {sh:02d}:{sm:02d}-{eh:02d}:{em:02d} [{c_type}] {event['name']}")
+            else:
+                print(f"寫入 Google Calendar 失敗: {res.status_code if res else 'No Response'}")
+        except Exception as e:
+            print(f"寫入 Google Calendar 異常: {e}")
 
     # 5.5 更新 Notion 中的書籍追蹤位置狀態做為跨日轉移
     try:
@@ -2178,40 +2253,79 @@ def run_mode_b(today_dt):
     except Exception as e:
         print(f"書籍位置狀態自動轉移失敗: {e}")
 
-    # 6. Telegram 發送今日日程 (無 emoji 格式)
-    schedule_lines = []
-    warning_alerts = []
-    
-    for event in planned_events:
-        sh, sm = divmod(event["start"], 60)
-        eh, em = divmod(event["end"], 60)
-        line = f"{sh:02d}:{sm:02d} - {eh:02d}:{em:02d} | [{event['type']}] {event['name']}"
-        if event["note"]:
-            line += f"\n   注意: {event['note']}"
-            warning_alerts.append(f"● {event['name']}: {event['note']}")
-        schedule_lines.append(line)
+    # 5.8 計算出門要帶去的物品 (明早出門必帶)
+    try:
+        today_subjects_to_bring = {get_title(s, "科目名稱") for s in today_fixed_schedules if get_title(s, "科目名稱")}
+        
+        todo_today_filter = {
+            "filter": {
+                "and": [
+                    {"property": "截止或考試日期", "date": {"equals": today_str}}
+                ]
+            }
+        }
+        today_todos = query_database_all(TODO_ACTIVITIES_DB_ID, todo_today_filter)
+        
+        today_required_items = {}
+        for sub in today_subjects_to_bring:
+            today_required_items[sub] = "課堂課本"
+            
+        for t in today_todos:
+            t_name = get_title(t, "名稱")
+            if not t_name or t_name.strip() == "":
+                continue
+            sub = get_rich_text(t, "相關科目")
+            t_type = get_select(t, "類型")
+            
+            label = "當天作業"
+            if t_type in ["回條", "報名表"]:
+                label = "重要回條"
+            elif t_type in ["小考", "段考"]:
+                label = "考試科目"
+                
+            if sub and sub.lower() != "無":
+                today_required_items[sub] = label
+            else:
+                today_required_items[t_name] = label
+                
+        tracker_results = query_database_all(BOOK_TRACKER_DB_ID)
+        location_tracker = {}
+        for r in tracker_results:
+            name = get_title(r, "科目/物品名稱")
+            loc = get_select(r, "目前位置")
+            if name:
+                location_tracker[name] = (loc, r["id"])
+                
+        bring_to_school = []
+        for item, label in today_required_items.items():
+            if item in location_tracker:
+                loc, page_id = location_tracker[item]
+                if loc == "在家裡":
+                    bring_to_school.append((item, label))
+            else:
+                bring_to_school.append((item, label))
+                create_page(BOOK_TRACKER_DB_ID, {
+                    "科目/物品名稱": {"title": [{"text": {"content": item}}]},
+                    "目前位置": {"select": {"name": "在家裡"}}
+                })
+        bring_to_school.sort(key=lambda x: x[0])
+    except Exception as e:
+        print(f"計算出門攜帶物品失敗: {e}")
+        bring_to_school = []
 
-    alert_section = ""
-    if warning_alerts:
-        alert_section = "【漏帶物品與課本警報】\n" + "\n".join(warning_alerts) + "\n\n"
+    # 6. Telegram 發送明早出門帶書通知
+    if bring_to_school:
+        bring_to_school_section = "\n".join([f"  [ ] {x[0]} ({x[1]})" for x in bring_to_school])
+    else:
+        bring_to_school_section = "  今日無須帶任何課本/物品去學校。"
 
-    unplanned_msg = ""
-    if unplanned_tasks:
-        unique_unplanned = {t["name"] for t in unplanned_tasks if "番茄鐘" not in t["name"]}
-        if unique_unplanned:
-            unplanned_msg = "\n注意: 因時間不足未排入的待辦：\n" + "\n".join([f"- {t}" for t in unique_unplanned])
+    telegram_msg = f"""【Life-Agent 晨間通知 - 書包檢查】
 
-    telegram_msg = f"""
-【Life-Agent 日程通知 - 時間管理與日程分配】
-
-{alert_section}今日時間日程表 (Time Blocking - 番茄鐘專注版)：
+[明早出門必帶去學校！]
 --------------------------------
-{chr(10).join(schedule_lines)}
+{bring_to_school_section}
 --------------------------------
-{unplanned_msg}
-
-今日目標：專注 50 分鐘、放鬆 10 分鐘，不漏帶任何課本，穩定前進！
-"""
+(作息日程已安排至 Google Calendar，請前往日曆查看詳細時間)"""
     send_telegram_message(telegram_msg)
 
 # ==================== 主程式入口 ====================
