@@ -103,48 +103,28 @@ EVENTS = [
     # ── 7/11 週六 ──
     {"date": "2026-07-11", "summary": "PC數學補習",        "start": "13:30", "end": "17:30", "cal": "class", "color": "5"},
 
-    # ── 7/13~17 第一週暑輔 ──
-    {"date": "2026-07-13", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
-    {"date": "2026-07-14", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
+    # ── 第一週補習 (7/14~18) ──
     {"date": "2026-07-14", "summary": "PC化學補習",        "start": "13:30", "end": "16:45", "cal": "class", "color": "5"},
     {"date": "2026-07-14", "summary": "MEC補習",           "start": "18:30", "end": "21:30", "cal": "class", "color": "5"},
-    {"date": "2026-07-15", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
     {"date": "2026-07-15", "summary": "PC物理補習",        "start": "13:30", "end": "16:40", "cal": "class", "color": "5"},
-    {"date": "2026-07-16", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
-    {"date": "2026-07-17", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
     {"date": "2026-07-18", "summary": "PC數學補習",        "start": "13:30", "end": "17:30", "cal": "class", "color": "5"},
 
-    # ── 7/20~25 第二週暑輔 ──
-    {"date": "2026-07-20", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
-    {"date": "2026-07-21", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
+    # ── 第二週補習 (7/21~25) ──
     {"date": "2026-07-21", "summary": "PC化學補習",        "start": "13:30", "end": "16:45", "cal": "class", "color": "5"},
     {"date": "2026-07-21", "summary": "MEC補習",           "start": "18:30", "end": "21:30", "cal": "class", "color": "5"},
-    {"date": "2026-07-22", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
     {"date": "2026-07-22", "summary": "PC物理補習",        "start": "13:30", "end": "16:40", "cal": "class", "color": "5"},
-    {"date": "2026-07-23", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
-    {"date": "2026-07-24", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
     {"date": "2026-07-25", "summary": "PC數學補習",        "start": "13:30", "end": "17:30", "cal": "class", "color": "5"},
 
-    # ── 7/27~31 第三週暑輔 ──
-    {"date": "2026-07-27", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
-    {"date": "2026-07-28", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
+    # ── 第三週補習 (7/28~) ──
     {"date": "2026-07-28", "summary": "PC化學補習",        "start": "13:30", "end": "16:45", "cal": "class", "color": "5"},
     {"date": "2026-07-28", "summary": "MEC補習",           "start": "18:30", "end": "21:30", "cal": "class", "color": "5"},
-    {"date": "2026-07-29", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
     {"date": "2026-07-29", "summary": "PC物理補習",        "start": "13:30", "end": "16:40", "cal": "class", "color": "5"},
-    {"date": "2026-07-30", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
-    {"date": "2026-07-31", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
 
-    # ── 8月 ──
+    # ── 8月補習 ──
     {"date": "2026-08-01", "summary": "PC數學補習",        "start": "13:30", "end": "17:30", "cal": "class", "color": "5"},
-    {"date": "2026-08-03", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
-    {"date": "2026-08-04", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
     {"date": "2026-08-04", "summary": "PC化學補習",        "start": "13:30", "end": "16:45", "cal": "class", "color": "5"},
     {"date": "2026-08-04", "summary": "MEC補習",           "start": "18:30", "end": "21:30", "cal": "class", "color": "5"},
-    {"date": "2026-08-05", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
     {"date": "2026-08-05", "summary": "PC物理補習",        "start": "13:30", "end": "16:40", "cal": "class", "color": "5"},
-    {"date": "2026-08-06", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
-    {"date": "2026-08-07", "summary": "暑輔",              "start": "08:00", "end": "12:00", "cal": "class", "color": "9"},
     {"date": "2026-08-08", "summary": "PC數學補習",        "start": "13:30", "end": "17:30", "cal": "class", "color": "5"},
 
     # ── 8/10-12 雄中參訪 (全天，無時間) ──
