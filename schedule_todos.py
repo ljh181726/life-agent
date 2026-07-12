@@ -2,15 +2,10 @@
 schedule_todos.py
 -----------------
 智慧學習排程助理。
-支援兩步驟運作：
-1. 增量與衝突排程 (Step 1)：
-   - 提取最近 7 天的空檔 (來自自習日曆 study_cal)，與現有 AI 排程的作業比對。
-   - 若現有 AI 作業不完全處於空檔內 (即與新行程衝突)，則將其刪除並重新排程。
-   - 找出 Notion 中全新、尚未安排的作業，將其排入剩餘可用空檔 (無指定時間的作業預設為 30 分鐘)。
-2. 每日 24:00 全面重新優化 (Step 2)：
-   - 清除未來 7 天所有 AI 排程的作業。
-   - 讀取 Notion 所有未完成待辦與自習日曆的所有空檔。
-   - 使用 Gemini 將最近 7 天的作業全新合理安排 (緊急優先，大任務拆分)。
+- 讀取 Notion 中的未完成待辦項目。
+- 讀取自習日曆 (study_cal) 中的可用空檔行程。
+- 清除 Google Calendar 上所有舊的 AI 自動排程作業時間塊 (僅刪除日曆行程，完全不影響 Notion 資料！)。
+- 使用 Gemini 分析，將未完成作業重新分配到最近 7 天的空檔 (緊急優先，大任務拆分，無註明時間者預設 30 分鐘)。
 """
 
 import os
@@ -18,7 +13,6 @@ import sys
 import json
 import time
 import requests
-import argparse
 from datetime import datetime, timedelta
 
 # Fix Windows console encoding
@@ -44,31 +38,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TOKEN_CACHE    = ".gcal_token_cache.json"
 SOURCE_TAG     = "life-agent-ai-scheduled"
 TZ             = "Asia/Taipei"
-PLAN_DAYS      = 7   # 最近 7 天
+PLAN_DAYS      = 7   # 重新排程最近 7 天
 
 if not NOTION_TOKEN or not TODO_DB_ID or not GEMINI_API_KEY:
     print("缺少必要環境變數 NOTION_TOKEN / NOTION_TODO_ACTIVITIES_DB_ID / GEMINI_API_KEY")
     sys.exit(1)
-
-# ── Parse arguments and determine mode ──────────────────────────────
-parser = argparse.ArgumentParser()
-parser.add_argument("--mode", choices=["step1", "step2", "auto"], default="auto")
-args, unknown = parser.parse_known_args()
-
-# Determine mode based on Taipei hour if "auto"
-import pytz
-tw_tz = pytz.timezone("Asia/Taipei")
-now_tw = datetime.now(tw_tz)
-
-mode = args.mode
-if mode == "auto":
-    # 24:00 (00:00 to 00:59) is Step 2
-    if now_tw.hour == 0:
-        mode = "step2"
-    else:
-        mode = "step1"
-
-print(f"目前台灣時間: {now_tw.strftime('%Y-%m-%d %H:%M:%S')}，執行模式: {mode.upper()}")
 
 # ── Google Calendar auth ────────────────────────────────────────────
 def get_gcal_token():
@@ -163,7 +137,6 @@ while has_more:
 
 today = datetime.now().date()
 todos = []
-todos_map = {}
 for page in notion_todos:
     name     = get_text(page, "名稱")
     t_type   = get_select(page, "類型")
@@ -172,7 +145,6 @@ for page in notion_todos:
     est_hr   = get_number(page, "預估時間（小時）")
     done_pg  = get_number(page, "已完成頁數/題數")
     total_pg = get_number(page, "總頁數/題數")
-    page_id  = page["id"]
 
     if not name:
         continue
@@ -183,18 +155,28 @@ for page in notion_todos:
     if est_hr is None:
         est_hr = 0.5
 
-    todo_item = {
-        "notion_page_id": page_id,
+    todos.append({
+        "notion_page_id": page["id"],
         "name":    name,
         "type":    t_type or "作業",
         "subject": subject or "無",
         "due":     due_str or "無截止日",
         "est_hr":  est_hr,
-    }
-    todos.append(todo_item)
-    todos_map[page_id] = todo_item
+    })
 
 print(f"共找到 {len(todos)} 筆未完成待辦。")
+if not todos:
+    print("沒有需要排程的待辦作業。")
+    # Clean up old events even if there are no todos
+    time_min = datetime.now().isoformat() + "+08:00"
+    time_max = (datetime.now() + timedelta(days=PLAN_DAYS)).isoformat() + "+08:00"
+    params = {"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "maxResults": 250}
+    r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events", headers=gcal_h, params=params)
+    if r.status_code == 200:
+        for ev in r.json().get("items", []):
+            if ev.get("extendedProperties", {}).get("private", {}).get("source") == SOURCE_TAG:
+                requests.delete(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events/{ev['id']}", headers=gcal_h)
+    sys.exit(0)
 
 # ── 2. Query free slots (next PLAN_DAYS) ───────────────────────────
 print(f"正在讀取未來 {PLAN_DAYS} 天自習日曆的「可用空檔」...")
@@ -214,123 +196,31 @@ if r.status_code == 200:
             })
 print(f"讀取到 {len(free_slots)} 個可用空檔。")
 
-# ── 3. Query existing AI-scheduled tasks ───────────────────────────
-print(f"正在讀取未來 {PLAN_DAYS} 天已安排的 AI 作業行程...")
-r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events", headers=gcal_h, params=params)
-ai_scheduled_events = []
-if r.status_code == 200:
-    for item in r.json().get("items", []):
-        src = item.get("extendedProperties", {}).get("private", {}).get("source")
-        if src == SOURCE_TAG:
-            ai_scheduled_events.append({
-                "id": item["id"],
-                "summary": item.get("summary", ""),
-                "start": item["start"]["dateTime"],
-                "end": item["end"]["dateTime"],
-                "notion_page_id": item.get("extendedProperties", {}).get("private", {}).get("notion_page_id", "")
-            })
-print(f"讀取到 {len(ai_scheduled_events)} 筆已安排 AI 行程。")
-
-# ── 4. Main Scheduling Logic based on Mode ────────────────────────
-to_schedule = []
-available_intervals = []
-
-if mode == "step2":
-    # ══════ STEP 2: Full Re-optimization ══════
-    print("\n[Step 2] 全面重新排程中。正在清除所有舊 AI 行程...")
-    cleared = 0
-    for ev in ai_scheduled_events:
-        dr = requests.delete(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events/{ev['id']}", headers=gcal_h)
-        if dr.status_code in [200, 204]:
-            cleared += 1
-    print(f"已清除 {cleared} 筆舊 AI 排程。")
-    
-    to_schedule = todos
-    for s in free_slots:
-        available_intervals.append((parse_iso(s["start"]), parse_iso(s["end"])))
-
-else:
-    # ══════ STEP 1: Incremental Conflict Check & Resolve ══════
-    print("\n[Step 1] 進行衝突比對與增量排程...")
-    
-    # Check for conflicts
-    conflicting_ids = set()
-    valid_tasks = []
-    
-    for ev in ai_scheduled_events:
-        ev_start = parse_iso(ev["start"])
-        ev_end   = parse_iso(ev["end"])
-        
-        # Check if ev is completely inside any of the free slots
-        is_valid = False
-        for s in free_slots:
-            s_start = parse_iso(s["start"])
-            s_end   = parse_iso(s["end"])
-            if s_start <= ev_start and ev_end <= s_end:
-                is_valid = True
-                break
-        
-        if not is_valid:
-            print(f"  發現衝突行程: {ev['summary']} ({ev['start']} - {ev['end']})，即將刪除並重排。")
-            requests.delete(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events/{ev['id']}", headers=gcal_h)
-            if ev["notion_page_id"]:
-                conflicting_ids.add(ev["notion_page_id"])
-        else:
-            valid_tasks.append(ev)
-            
-    # Find new / unscheduled todos
-    scheduled_todo_ids = {ev["notion_page_id"] for ev in valid_tasks if ev["notion_page_id"]}
-    unscheduled_todos = []
-    for t in todos:
-        pid = t["notion_page_id"]
-        if pid in conflicting_ids or pid not in scheduled_todo_ids:
-            unscheduled_todos.append(t)
-            
-    print(f"  衝突重排待辦: {len(conflicting_ids)} 筆，全新未安排待辦: {len(unscheduled_todos) - len(conflicting_ids)} 筆。")
-    
-    if not unscheduled_todos:
-        print("  所有待辦均已在合理空檔中排定，無須重排或增量排程。")
-        sys.exit(0)
-        
-    to_schedule = unscheduled_todos
-    
-    # Calculate remaining free slots = free_slots - valid_tasks
-    all_free = [(parse_iso(s["start"]), parse_iso(s["end"])) for s in free_slots]
-    busy_list = [(parse_iso(ev["start"]), parse_iso(ev["end"])) for ev in valid_tasks]
-    
-    result_intervals = list(all_free)
-    for b_start, b_end in busy_list:
-        next_res = []
-        for s_start, s_end in result_intervals:
-            if b_end <= s_start or b_start >= s_end:
-                next_res.append((s_start, s_end))
-            else:
-                if s_start < b_start:
-                    next_res.append((s_start, b_start))
-                if b_end < s_end:
-                    next_res.append((b_end, s_end))
-        result_intervals = next_res
-        
-    available_intervals = [x for x in result_intervals if (x[1] - x[0]).total_seconds() >= 600] # Min 10 mins
-
-# ── 5. Call Gemini to Place Tasks ──────────────────────────────────
-if not to_schedule:
-    print("沒有需要排程的任務。")
+if not free_slots:
+    print("沒有可用的空檔行程！請確認自習日曆已成功更新。")
     sys.exit(0)
 
-if not available_intervals:
-    print("沒有可用的空檔區塊可供排程！")
-    sys.exit(1)
+# ── 3. Clear old AI-scheduled events ───────────────────────────────
+print("正在清除未來 7 天的舊 AI 作業排程 (僅刪除行事曆行程，Notion 資料安全無恙)...")
+r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events", headers=gcal_h, params=params)
+cleared = 0
+if r.status_code == 200:
+    for ev in r.json().get("items", []):
+        if ev.get("extendedProperties", {}).get("private", {}).get("source") == SOURCE_TAG:
+            dr = requests.delete(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events/{ev['id']}", headers=gcal_h)
+            if dr.status_code in [200, 204]:
+                cleared += 1
+print(f"已清除 {cleared} 筆舊 AI 排程。")
 
-# Format intervals and todos for prompt
+# ── 4. Call Gemini to Plan ──────────────────────────────────────────
 slots_text = "\n".join(
-    f"  - {fs.strftime('%Y-%m-%d')} {fs.strftime('%H:%M')} ~ {fe.strftime('%H:%M')} (可用 {(fe - fs).seconds // 60} 分鐘)"
-    for fs, fe in sorted(available_intervals)
+    f"  - {parse_iso(fs['start']).strftime('%Y-%m-%d %H:%M')} ~ {parse_iso(fs['end']).strftime('%H:%M')} (可用 {(parse_iso(fs['end']) - parse_iso(fs['start'])).seconds // 60} 分鐘)"
+    for fs in free_slots
 )
 
 todos_text = "\n".join(
     f"  - ID: {t['notion_page_id']} | [{t['type']}] {t['name']} | 科目:{t['subject']} | 截止:{t['due']} | 預估:{t['est_hr']}小時"
-    for t in to_schedule
+    for t in todos
 )
 
 today_str = today.strftime("%Y-%m-%d")
@@ -339,7 +229,7 @@ end_str = (today + timedelta(days=PLAN_DAYS)).strftime("%Y-%m-%d")
 prompt = f"""你是一個智慧學習排程助理。今天是 {today_str}。
 
 ## 規則
-1. 排程範圍：最近 7 天，至 {end_str}。
+1. 排程範圍：未來 {PLAN_DAYS} 天，至 {end_str}。
 2. 請只使用以下列出的「可用空檔」進行排程。不可在空檔之外的時間安排任何事項：
 {slots_text}
 
@@ -423,7 +313,7 @@ except json.JSONDecodeError as e:
 
 print(f"Gemini 規劃出 {len(schedule)} 個工作塊。")
 
-# ── 6. Write New Schedule to Calendar ───────────────────────────────
+# ── 5. Write to Google Calendar ─────────────────────────────────────
 print("正在寫入 Google Calendar...")
 success = 0
 for block in schedule:
