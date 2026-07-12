@@ -4,6 +4,15 @@ import json
 import requests
 import time
 
+# Load env variables from .env
+env_path = ".env"
+if os.path.exists(env_path):
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if "=" in line and not line.startswith("#"):
+                k, v = line.strip().split("=", 1)
+                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+
 TOKEN_CACHE_FILE = ".gcal_token_cache.json"
 
 def get_google_calendar_access_token():
