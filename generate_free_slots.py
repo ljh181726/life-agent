@@ -60,7 +60,7 @@ act_cal   = os.environ.get("GOOGLE_CALENDAR_ID_ACTIVITY") or os.environ.get("GOO
 all_cals  = list(dict.fromkeys([class_cal, task_cal, act_cal]))
 
 SOURCE_TAG = "life-agent-free-slot"
-PLAN_DAYS  = 14
+PLAN_DAYS  = 30
 TZ         = "Asia/Taipei"
 
 # 課堂內可用的最後N分鐘（非中堂休息，非留校）

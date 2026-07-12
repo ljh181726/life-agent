@@ -38,11 +38,22 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TOKEN_CACHE    = ".gcal_token_cache.json"
 SOURCE_TAG     = "life-agent-ai-scheduled"
 TZ             = "Asia/Taipei"
-PLAN_DAYS      = 7   # 重新排程最近 7 天
 
 if not NOTION_TOKEN or not TODO_DB_ID or not GEMINI_API_KEY:
     print("缺少必要環境變數 NOTION_TOKEN / NOTION_TODO_ACTIVITIES_DB_ID / GEMINI_API_KEY")
     sys.exit(1)
+
+# ── Parse Arguments ──────────────────────────────────────────────────
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--days", type=int, default=9, help="Number of days to schedule")
+parser.add_argument("--offset", type=int, default=0, help="Days offset from today to start scheduling")
+args, unknown = parser.parse_known_args()
+
+PLAN_DAYS = args.days
+OFFSET_DAYS = args.offset
+
+print(f"排程天數: {PLAN_DAYS} 天，起始偏移量: {OFFSET_DAYS} 天")
 
 # ── Google Calendar auth ────────────────────────────────────────────
 def get_gcal_token():
@@ -149,10 +160,10 @@ def create_notion_todo(name, subject, due_date):
         print(f"  [Notion] 建立補習作業失敗 {name}: {r.status_code} - {r.text}")
         return False
 
-def auto_generate_cram_homeworks(existing_todos):
-    print("正在檢查未來 10 天是否有補習班課程，以自動生成作業...")
-    time_min = datetime.now().isoformat() + "+08:00"
-    time_max = (datetime.now() + timedelta(days=10)).isoformat() + "+08:00"
+def auto_generate_cram_homeworks(existing_todos, target_date, days_range):
+    print(f"正在檢查未來 {days_range} 天是否有補習班課程，以自動生成作業...")
+    time_min = target_date.isoformat() + "T00:00:00+08:00"
+    time_max = (target_date + timedelta(days=days_range)).isoformat() + "T23:59:59+08:00"
     params = {"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "maxResults": 250, "orderBy": "startTime"}
     r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{class_cal}/events", headers=gcal_h, params=params)
     
@@ -233,12 +244,14 @@ def fetch_all_notion_todos():
 
 notion_todos = fetch_all_notion_todos()
 
+# Target date shifted by offset
+today = datetime.now().date() + timedelta(days=OFFSET_DAYS)
+
 # Auto-generate cram school homeworks
-if auto_generate_cram_homeworks(notion_todos):
+if auto_generate_cram_homeworks(notion_todos, today, PLAN_DAYS):
     # Re-fetch if any new todos were created
     notion_todos = fetch_all_notion_todos()
 
-today = datetime.now().date()
 todos = []
 for page in notion_todos:
 
@@ -273,8 +286,8 @@ print(f"共找到 {len(todos)} 筆未完成待辦。")
 if not todos:
     print("沒有需要排程的待辦作業。")
     # Clean up old events even if there are no todos
-    time_min = datetime.now().isoformat() + "+08:00"
-    time_max = (datetime.now() + timedelta(days=PLAN_DAYS)).isoformat() + "+08:00"
+    time_min = datetime.combine(today, datetime.min.time()).isoformat() + "+08:00"
+    time_max = datetime.combine(today + timedelta(days=PLAN_DAYS), datetime.max.time()).isoformat() + "+08:00"
     params = {"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "maxResults": 250}
     r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events", headers=gcal_h, params=params)
     if r.status_code == 200:
@@ -285,8 +298,8 @@ if not todos:
 
 # ── 2. Query free slots (next PLAN_DAYS) ───────────────────────────
 print(f"正在讀取未來 {PLAN_DAYS} 天自習日曆的「可用空檔」...")
-time_min = datetime.now().isoformat() + "+08:00"
-time_max = (datetime.now() + timedelta(days=PLAN_DAYS)).isoformat() + "+08:00"
+time_min = datetime.combine(today, datetime.min.time()).isoformat() + "+08:00"
+time_max = datetime.combine(today + timedelta(days=PLAN_DAYS), datetime.max.time()).isoformat() + "+08:00"
 
 params = {"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "maxResults": 250, "orderBy": "startTime"}
 r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{study_cal}/events", headers=gcal_h, params=params)
@@ -306,7 +319,7 @@ if not free_slots:
     sys.exit(0)
 
 # ── 3. Clear old AI-scheduled events ───────────────────────────────
-print("正在清除未來 7 天的舊 AI 作業排程 (僅刪除行事曆行程，Notion 資料安全無恙)...")
+print(f"正在清除未來 {PLAN_DAYS} 天的舊 AI 作業排程 (僅刪除行事曆行程，Notion 資料安全無恙)...")
 r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events", headers=gcal_h, params=params)
 cleared = 0
 if r.status_code == 200:
