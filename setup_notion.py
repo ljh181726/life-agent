@@ -114,6 +114,14 @@ def main():
                 "今日攜帶清單": {"rich_text": {}},
                 "備註": {"rich_text": {}}
             }
+        },
+        "NOTION_TEMP_INBOX_DB_ID": {
+            "title": "隨手記暫存區資料庫",
+            "properties": {
+                "內容": {"title": {}},
+                "日期": {"date": {}},
+                "照片上傳": {"files": {}}
+            }
         }
     }
 

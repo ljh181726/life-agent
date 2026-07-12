@@ -12,6 +12,31 @@ import re
 
 TOKEN_CACHE_FILE = "d:/antigravity/life-agent/.gcal_token_cache.json"
 
+def request_with_retry(method, url, retries=3, backoff_factor=1.0, status_forcelist=(429, 500, 502, 503, 504), **kwargs):
+    for attempt in range(retries):
+        try:
+            res = requests.request(method, url, **kwargs)
+            if res.status_code in status_forcelist:
+                print(f"HTTP {res.status_code} 錯誤，進行第 {attempt + 1} 次重試...")
+                time.sleep(backoff_factor * (2 ** attempt))
+                continue
+            return res
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            print(f"網路連線異常 {e}，進行第 {attempt + 1} 次重試...")
+            time.sleep(backoff_factor * (2 ** attempt))
+    return requests.request(method, url, **kwargs)
+
+def safe_generate_content(model, *args, **kwargs):
+    retries = 3
+    backoff_factor = 1.0
+    for attempt in range(retries):
+        try:
+            return model.generate_content(*args, **kwargs)
+        except Exception as e:
+            print(f"Gemini API 呼叫失敗 ({e})，進行第 {attempt + 1} 次重試...")
+            time.sleep(backoff_factor * (2 ** attempt))
+    return model.generate_content(*args, **kwargs)
+
 def get_google_calendar_access_token():
     if os.path.exists(TOKEN_CACHE_FILE):
         try:
@@ -38,7 +63,7 @@ def get_google_calendar_access_token():
         "grant_type": "refresh_token"
     }
     try:
-        res = requests.post(url, data=payload)
+        res = request_with_retry("POST", url, data=payload)
         res.raise_for_status()
         res_json = res.json()
         access_token = res_json.get("access_token")
@@ -68,7 +93,7 @@ def make_gcal_request(method, url, headers=None, **kwargs):
     headers["Authorization"] = f"Bearer {token}"
     
     try:
-        res = requests.request(method, url, headers=headers, **kwargs)
+        res = request_with_retry(method, url, headers=headers, **kwargs)
         if res.status_code in [400, 401]:
             print(f"Google Calendar API 回傳 {res.status_code}，嘗試清除快取並重新整理 Token...")
             if os.path.exists(TOKEN_CACHE_FILE):
@@ -80,7 +105,7 @@ def make_gcal_request(method, url, headers=None, **kwargs):
             if not token:
                 return res
             headers["Authorization"] = f"Bearer {token}"
-            res = requests.request(method, url, headers=headers, **kwargs)
+            res = request_with_retry(method, url, headers=headers, **kwargs)
         return res
     except Exception as e:
         print(f"Google Calendar HTTP 請求失敗: {e}")
@@ -150,6 +175,7 @@ ACTIVITIES_DB_ID = os.environ.get("NOTION_ACTIVITIES_DB_ID")
 BOOK_TRACKER_DB_ID = os.environ.get("NOTION_BOOK_TRACKER_DB_ID")
 LEDGER_DB_ID = os.environ.get("NOTION_LEDGER_DB_ID")
 WEEKLY_CALENDAR_DB_ID = os.environ.get("NOTION_WEEKLY_CALENDAR_DB_ID")
+TEMP_INBOX_DB_ID = os.environ.get("NOTION_TEMP_INBOX_DB_ID")
 
 # Notion API Headers
 HEADERS = {
@@ -188,7 +214,7 @@ def query_database_all(database_id, filter_payload=None):
         if next_cursor:
             payload["start_cursor"] = next_cursor
             
-        res = requests.post(url, headers=HEADERS, json=payload)
+        res = request_with_retry("POST", url, headers=HEADERS, json=payload)
         res.raise_for_status()
         data = res.json()
         results.extend(data.get("results", []))
@@ -206,7 +232,7 @@ def create_page(database_id, properties):
         "parent": {"database_id": database_id},
         "properties": properties
     }
-    res = requests.post(url, headers=HEADERS, json=data)
+    res = request_with_retry("POST", url, headers=HEADERS, json=data)
     res.raise_for_status()
     return res.json()
 
@@ -215,14 +241,14 @@ def update_page(page_id, properties):
     data = {
         "properties": properties
     }
-    res = requests.patch(url, headers=HEADERS, json=data)
+    res = request_with_retry("PATCH", url, headers=HEADERS, json=data)
     res.raise_for_status()
     return res.json()
 
 def delete_page(page_id):
     url = f"https://api.notion.com/v1/pages/{page_id}"
     data = {"archived": True}
-    res = requests.patch(url, headers=HEADERS, json=data)
+    res = request_with_retry("PATCH", url, headers=HEADERS, json=data)
     res.raise_for_status()
     return res.json()
 
@@ -279,7 +305,7 @@ def get_bot_user_id():
         return None
     try:
         url = "https://api.notion.com/v1/users/me"
-        res = requests.get(url, headers=HEADERS)
+        res = request_with_retry("GET", url, headers=HEADERS)
         if res.status_code == 200:
             return res.json().get("id")
     except Exception as e:
@@ -309,7 +335,7 @@ def send_telegram_message(message):
         "text": message
     }
     try:
-        res = requests.post(url, json=payload)
+        res = request_with_retry("POST", url, json=payload)
         res.raise_for_status()
         print("Telegram 訊息發送成功。")
     except Exception as e:
@@ -329,7 +355,7 @@ def run_github_action(workflow_file, ref='main'):
         'Accept': 'application/vnd.github.v3+json'
     }
     try:
-        res = requests.post(url, json=payload, headers=headers)
+        res = request_with_retry("POST", url, json=payload, headers=headers)
         res.raise_for_status()
         return f'Success (status {res.status_code})'
     except Exception as e:
@@ -339,7 +365,7 @@ def get_telegram_file_url(file_id):
     if not TELEGRAM_BOT_TOKEN:
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
-    res = requests.get(url)
+    res = request_with_retry("GET", url)
     res.raise_for_status()
     file_path = res.json().get("result", {}).get("file_path")
     if file_path:
@@ -372,7 +398,7 @@ def parse_hw_command(text, today_str):
         }}
         """
         model = genai.GenerativeModel('gemini-3.1-flash-lite')
-        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        response = safe_generate_content(model, prompt, generation_config={"response_mime_type": "application/json"})
         return safe_load_json(response.text)
     except Exception as e:
         print(f"Gemini parse_hw_command 失敗: {e}")
@@ -406,7 +432,7 @@ def parse_finish_command(text):
         }}
         """
         model = genai.GenerativeModel('gemini-3.1-flash-lite')
-        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        response = safe_generate_content(model, prompt, generation_config={"response_mime_type": "application/json"})
         return safe_load_json(response.text)
     except Exception as e:
         print(f"Gemini parse_finish_command 失敗: {e}")
@@ -439,7 +465,7 @@ def parse_act_command(text, today_str):
         }}
         """
         model = genai.GenerativeModel('gemini-3.1-flash-lite')
-        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        response = safe_generate_content(model, prompt, generation_config={"response_mime_type": "application/json"})
         return safe_load_json(response.text)
     except Exception as e:
         print(f"Gemini parse_act_command 失敗: {e}")
@@ -488,7 +514,7 @@ def process_telegram_commands(today_dt):
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     try:
-        res = requests.get(url)
+        res = request_with_retry("GET", url)
         res.raise_for_status()
         updates = res.json().get("result", [])
     except Exception as e:
@@ -680,7 +706,7 @@ def process_telegram_commands(today_dt):
             try:
                 file_url = get_telegram_file_url(file_id)
                 if file_url:
-                    resp = requests.get(file_url)
+                    resp = request_with_retry("GET", file_url)
                     resp.raise_for_status()
                     file_bytes = resp.content
             except Exception as e:
@@ -957,7 +983,7 @@ def process_telegram_commands(today_dt):
     if max_update_id > 0:
         try:
             ack_url = f"{url}?offset={max_update_id + 1}"
-            requests.get(ack_url).raise_for_status()
+            request_with_retry("GET", ack_url).raise_for_status()
             print(f"已確認更新，新 offset: {max_update_id + 1}")
         except Exception as e:
             print(f"確認 Telegram 更新失敗: {e}")
@@ -989,7 +1015,7 @@ def get_file_mime_type(content):
 
 def analyze_receipt(image_url):
     print(f"開始分析發票照片: {image_url[:60]}...")
-    resp = requests.get(image_url)
+    resp = request_with_retry("GET", image_url)
     resp.raise_for_status()
     content = resp.content
     mime_type = get_file_mime_type(content)
@@ -1008,7 +1034,7 @@ def analyze_receipt(image_url):
     }
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
-    response = model.generate_content([
+    response = safe_generate_content(model, [
         {
             'mime_type': mime_type,
             'data': content
@@ -1019,7 +1045,7 @@ def analyze_receipt(image_url):
 
 def analyze_todo_photo(image_url, today_str):
     print(f"開始分析聯絡簿/考卷/回條照片: {image_url[:60]}...")
-    resp = requests.get(image_url)
+    resp = request_with_retry("GET", image_url)
     resp.raise_for_status()
     return analyze_todo_photo_bytes(resp.content, today_str)
 
@@ -1041,7 +1067,7 @@ def analyze_todo_photo_bytes(content, today_str):
     }
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
-    response = model.generate_content([
+    response = safe_generate_content(model, [
         {
             'mime_type': mime_type,
             'data': content
@@ -1052,7 +1078,7 @@ def analyze_todo_photo_bytes(content, today_str):
 
 def analyze_activity_brochure(image_url, user_instruction=""):
     print(f"開始分析活動簡章照片: {image_url[:60]}...")
-    resp = requests.get(image_url)
+    resp = request_with_retry("GET", image_url)
     resp.raise_for_status()
     return analyze_activity_brochure_bytes(resp.content, user_instruction)
 
@@ -1188,7 +1214,7 @@ def analyze_activity_brochure_bytes(content, user_instruction=""):
     }}
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
-    response = model.generate_content([
+    response = safe_generate_content(model, [
         {
             'mime_type': mime_type,
             'data': content
@@ -1262,7 +1288,7 @@ def analyze_calendar_text(text_content, today_str):
     }}
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
-    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    response = safe_generate_content(model, prompt, generation_config={"response_mime_type": "application/json"})
     return safe_load_json(response.text)
 
 def route_and_parse_natural_text(text_content, today_str):
@@ -1320,7 +1346,7 @@ def route_and_parse_natural_text(text_content, today_str):
     }}
     """
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
-    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    response = safe_generate_content(model, prompt, generation_config={"response_mime_type": "application/json"})
     return safe_load_json(response.text)
 
 # ==================== 核心邏輯 A：下午 5:00 執行 ====================
@@ -2326,7 +2352,156 @@ def run_mode_b(today_dt):
 {bring_to_school_section}
 --------------------------------
 (作息日程已安排至 Google Calendar，請前往日曆查看詳細時間)"""
+
+    # 7. 隨手記一日總結與碎片提取整合
+    daily_summary_text = ""
+    if TEMP_INBOX_DB_ID:
+        try:
+            inbox_filter = {
+                "filter": {
+                    "and": [
+                        {"property": "日期", "date": {"equals": today_str}}
+                    ]
+                }
+            }
+            inbox_entries = query_database_all(TEMP_INBOX_DB_ID, inbox_filter)
+            inbox_entries = [x for x in inbox_entries if get_title(x, "內容").strip() != ""]
+            
+            if inbox_entries:
+                print(f"偵測到今日隨手記暫存區共有 {len(inbox_entries)} 筆資料，進行一日總結與碎片資料處理...")
+                
+                # 下載所有照片
+                pil_images = []
+                for entry in inbox_entries:
+                    photo_url = get_first_file_url(entry, "照片上傳")
+                    if photo_url:
+                        try:
+                            resp = request_with_retry("GET", photo_url)
+                            if resp.status_code == 200:
+                                pil_images.append(Image.open(io.BytesIO(resp.content)))
+                        except Exception as e:
+                            print(f"下載暫存照片失敗: {e}")
+                            
+                # 呼叫 Gemini 進行總結與提取
+                inbox_texts = [f"- {get_title(x, '內容')}" for x in inbox_entries]
+                inbox_texts_str = "\n".join(inbox_texts)
+                
+                prompt = f"""
+                請分析以下使用者今天隨手記下的碎片文字與照片，完成兩件事：
+                
+                1. 撰寫一篇溫馨、生動、完整的【一日總結】（日記）。請以繁體中文撰寫，字數約 150-300 字。
+                2. 從這些碎片資料中，分析並提取出以下三類標準資料（若無則不提取）：
+                   - "add_expense" (消費/記帳記錄)：提取 name(品項), amount(金額，整數), category(分類: 飲食、交通、娛樂、學習)
+                   - "add_todo" (學校作業/小考待辦)：提取 name(簡短事項描述), subject(科目), due_date(格式 YYYY-MM-DD，若無為 "#"), type(作業、小考、段考、回條、報名表)
+                   - "add_activity" (一次性活動)：提取 name(活動名稱), date(格式 YYYY-MM-DD), type(講座、營隊、比賽、志工、休閒、其他)
+                   
+                碎片文字內容如下：
+                {inbox_texts_str}
+                
+                請務必以 JSON 格式回覆，結構如下（不要包含 ```json 等 markdown 標記）：
+                {{
+                  "daily_summary": "今日的一日總結內容...",
+                  "actions": [
+                    {{
+                      "action": "add_expense",
+                      "data": {{"name": "品項名稱", "amount": 150, "category": "飲食"}}
+                    }}
+                  ]
+                }}
+                """
+                
+                model = genai.GenerativeModel('gemini-3.1-flash-lite')
+                if pil_images:
+                    response = safe_generate_content(model, [prompt] + pil_images, generation_config={"response_mime_type": "application/json"})
+                else:
+                    response = safe_generate_content(model, prompt, generation_config={"response_mime_type": "application/json"})
+                    
+                res_json = safe_load_json(response.text)
+                daily_summary_text = res_json.get("daily_summary", "")
+                actions = res_json.get("actions", [])
+                
+                # 處理提取的動作
+                for act in actions:
+                    action_type = act.get("action")
+                    d = act.get("data", {})
+                    if action_type == "add_expense":
+                        if LEDGER_DB_ID:
+                            create_page(LEDGER_DB_ID, {
+                                "項目名稱": {"title": [{"text": {"content": d.get("name", "隨手記消費")}}]},
+                                "日期": {"date": {"start": today_str}},
+                                "金額": {"number": int(d.get("amount", 0))},
+                                "分類": {"select": {"name": d.get("category", "飲食")}}
+                            })
+                            print(f"已從隨手記自動寫入消費: {d.get('name')} = {d.get('amount')}元")
+                    elif action_type == "add_todo":
+                        if TODO_ACTIVITIES_DB_ID:
+                            create_page(TODO_ACTIVITIES_DB_ID, {
+                                "名稱": {"title": [{"text": {"content": d.get("name", "未命名事項")}}]},
+                                "類型": {"select": {"name": d.get("type", "作業")}},
+                                "截止或考試日期": {"date": {"start": d.get("due_date", today_str) if d.get("due_date") != "#" else today_str}},
+                                "相關科目": {"rich_text": [{"text": {"content": d.get("subject", "無")}}]},
+                                "總頁數/題數": {"number": 1},
+                                "已完成頁數/題數": {"number": 0}
+                            })
+                            print(f"已從隨手記自動寫入待辦: {d.get('name')}")
+                    elif action_type == "add_activity":
+                        if ACTIVITIES_DB_ID:
+                            create_page(ACTIVITIES_DB_ID, {
+                                "活動名稱": {"title": [{"text": {"content": d.get("name", "未命名活動")}}]},
+                                "日期": {"date": {"start": d.get("date", today_str)}},
+                                "類型": {"select": {"name": d.get("type", "其他")}}
+                            })
+                            print(f"已從隨手記自動寫入活動: {d.get('name')}")
+                            
+                # 清理已處理的暫存資料
+                for entry in inbox_entries:
+                    delete_page(entry["id"])
+                print(f"已成功清理/封存 {len(inbox_entries)} 筆暫存資料。")
+                
+        except Exception as e:
+            print(f"隨手記暫存與一日總結處理失敗: {e}")
+
+    if daily_summary_text:
+        telegram_msg += f"\n\n【一日生活總結】\n{daily_summary_text}"
+
     send_telegram_message(telegram_msg)
+
+def run_mode_shortcut(today_dt):
+    print("【隨手記 SHORTCUT 模式】將輸入寫入 Notion 暫存區")
+    today_str = today_dt.strftime("%Y-%m-%d")
+    
+    # 讀取輸入 (優先從環境變數，次之從 command-line 參數)
+    shortcut_text = os.environ.get("SHORTCUT_TEXT")
+    shortcut_photo_url = os.environ.get("SHORTCUT_PHOTO_URL")
+    
+    for arg in sys.argv:
+        if arg.startswith("--text="):
+            shortcut_text = arg.split("=", 1)[1]
+        elif arg.startswith("--photo_url="):
+            shortcut_photo_url = arg.split("=", 1)[1]
+            
+    if not shortcut_text and not shortcut_photo_url:
+        print("未偵測到任何隨手記文字或照片網址輸入，跳過寫入。")
+        return
+        
+    if not TEMP_INBOX_DB_ID:
+        print("警告: 未設定 NOTION_TEMP_INBOX_DB_ID，無法寫入暫存區。")
+        return
+        
+    properties = {
+        "內容": {"title": [{"text": {"content": shortcut_text or "隨手記照片"}}]},
+        "日期": {"date": {"start": today_str}}
+    }
+    if shortcut_photo_url:
+        properties["照片上傳"] = {
+            "files": [{"name": "shortcut_photo.jpg", "type": "external", "external": {"url": shortcut_photo_url}}]
+        }
+        
+    try:
+        create_page(TEMP_INBOX_DB_ID, properties)
+        print("已成功將隨手記碎片資料寫入 Notion 暫存區！")
+    except Exception as e:
+        print(f"寫入 Notion 暫存區失敗: {e}")
 
 # ==================== 主程式入口 ====================
 
@@ -2345,7 +2520,9 @@ def main():
                     mode = sys.argv[idx + 1].upper()
 
     if not mode:
-        if 15 <= now.hour <= 20:
+        if os.environ.get("SHORTCUT_TEXT") or os.environ.get("SHORTCUT_PHOTO_URL"):
+            mode = "SHORTCUT"
+        elif 15 <= now.hour <= 20:
             mode = "A"
         elif now.hour >= 22 or now.hour <= 2:
             mode = "B"
@@ -2368,6 +2545,8 @@ def main():
         run_mode_a(today_dt)
     elif mode == "B":
         run_mode_b(today_dt)
+    elif mode == "SHORTCUT":
+        run_mode_shortcut(today_dt)
     else:
         print(f"未知的執行模式: {mode}")
 
