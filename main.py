@@ -37,6 +37,57 @@ def safe_generate_content(model, *args, **kwargs):
             time.sleep(backoff_factor * (2 ** attempt))
     return model.generate_content(*args, **kwargs)
 
+def get_todo_duration(name, default_dur):
+    import re
+    match_min = re.search(r"\(需(\d+)分鐘\)", name)
+    match_hr = re.search(r"\(需(\d+)小時\)", name)
+    if match_min:
+        return int(match_min.group(1))
+    elif match_hr:
+        return int(match_hr.group(1)) * 60
+    return default_dur
+
+def write_activity_to_gcal(name, date_val, a_type):
+    calendar_id = "primary"
+    url_create = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+    
+    if not date_val:
+        return
+        
+    if "/" in date_val:
+        parts = date_val.split("/")
+        start_str = parts[0].strip()
+        end_str = parts[1].strip()
+    else:
+        start_str = date_val.strip()
+        end_str = start_str
+        
+    try:
+        from datetime import datetime, timedelta
+        start_dt = datetime.strptime(start_str, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_str, "%Y-%m-%d")
+        end_plus_1 = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        payload = {
+            "summary": name,
+            "description": f"[Life-Agent 自動生成] 類型: {a_type}",
+            "start": {"date": start_str},
+            "end": {"date": end_plus_1},
+            "colorId": "10",  # Basil (Green) for activities
+            "extendedProperties": {
+                "private": {
+                    "source": "life-agent-activity"
+                }
+            }
+        }
+        res = make_gcal_request("POST", url_create, json=payload)
+        if res and res.status_code == 200:
+            print(f"已同步活動至 Google Calendar: {name}")
+        else:
+            print(f"同步活動至 Google Calendar 失敗: {res.status_code if res else 'No Response'}")
+    except Exception as e:
+        print(f"同步活動至 Google Calendar 異常: {e}")
+
 def get_google_calendar_access_token():
     if os.path.exists(TOKEN_CACHE_FILE):
         try:
@@ -631,18 +682,31 @@ def process_telegram_commands(today_dt):
                     date_val = data.get("date") or today_str
                     a_type = data.get("type") or "其他"
                     
-                    if not is_valid_date_format(date_val):
-                        date_val = today_str
-                    if a_type not in ["講座", "營隊", "比賽", "志工", "休閒", "其他"]:
-                        a_type = "其他"
-                    
+                    start_date = date_val.strip()
+                    end_date = None
+                    if "/" in date_val:
+                        parts = date_val.split("/")
+                        start_date = parts[0].strip()
+                        end_date = parts[1].strip()
+                        
+                    if not is_valid_date_format(start_date):
+                        start_date = today_str
+                    if end_date and not is_valid_date_format(end_date):
+                        end_date = None
+                        
+                    date_prop = {"start": start_date}
+                    if end_date:
+                        date_prop["end"] = end_date
+                        
                     properties = {
                         "活動名稱": {"title": [{"text": {"content": name}}]},
-                        "日期": {"date": {"start": date_val.strip()}},
+                        "日期": {"date": date_prop},
                         "類型": {"select": {"name": a_type}}
                     }
                     create_page(ACTIVITIES_DB_ID, properties)
-                    send_telegram_message(f"已自動分析並新增活動：{name} (日期: {date_val}, 類型: {a_type})")
+                    write_activity_to_gcal(name, date_val, a_type)
+                    range_msg = f"{start_date} 至 {end_date}" if end_date else start_date
+                    send_telegram_message(f"已自動分析並新增活動：{name} (日期: {range_msg}, 類型: {a_type})，且已同步至 Google Calendar。")
                     
                 elif action == "add_expense":
                     name = data.get("name") or "未分類消費"
@@ -666,19 +730,17 @@ def process_telegram_commands(today_dt):
                     send_telegram_message(f"已自動記帳：{name}，金額：{amount} 元 (分類: {cat})")
                     
                 else:
-                    # generic_todo or fallback
+                    # generic_todo or fallback (雜項備忘)
                     name = data.get("name") or text
-                    date_val = data.get("date")
-                    
-                    properties = {
-                        "名稱": {"title": [{"text": {"content": name}}]},
-                        "類型": {"select": {"name": "作業"}}
-                    }
-                    if date_val and is_valid_date_format(date_val):
-                        properties["截止或考試日期"] = {"date": {"start": date_val.strip()}}
-                        
-                    create_page(TODO_ACTIVITIES_DB_ID, properties)
-                    send_telegram_message(f"已自動新增備忘待辦：{name}")
+                    if TEMP_INBOX_DB_ID:
+                        properties = {
+                            "內容": {"title": [{"text": {"content": f"雜項:{name}"}}]},
+                            "日期": {"date": {"start": today_str}}
+                        }
+                        create_page(TEMP_INBOX_DB_ID, properties)
+                        send_telegram_message(f"已記下雜項提醒：{name}。將於深夜通知時提醒您！")
+                    else:
+                        send_telegram_message(f"暫存區未設定，無法記錄雜項：{name}")
                     
             except Exception as e:
                 print(f"自動路由分析失敗: {e}")
@@ -1113,7 +1175,7 @@ def analyze_activity_brochure_bytes(content, user_instruction=""):
     
     1. action: "add_todo" (新增功課、作業、小考、考試準備等課業學習相關待辦事項)
        提取 data 欄位：
-       - name (功課/待辦事項名稱或描述，請使用簡短的繁體中文，且不要包含科目名稱，例如「英文閱讀報告」-> name為「閱讀報告」)
+       - name (功課/待辦事項名稱或描述，請使用簡短的繁體中文，且不要包含科目名稱。如果使用者提及了預估耗時，例如「需3小時」、「需180分鐘」，請在 name 末尾加上「 (需X小時)」或「 (需X分鐘)」，例如「英文補課 (需3小時)」)
        - subject (相關科目，例如「數學」、「英文」、「物理」等，若無請填 "無")
        - due_date (截止日期，格式為 YYYY-MM-DD。若無提到請填 "#")
        - type (類型，必須是以下之一："作業"、"小考"、"段考"、"回條"、"報名表")
@@ -1126,7 +1188,7 @@ def analyze_activity_brochure_bytes(content, user_instruction=""):
     3. action: "add_activity" (新增一次性活動、比賽、講座、營隊、志工、出遊行程等)
        提取 data 欄位：
        - name (活動名稱)
-       - date (活動日期，格式為 YYYY-MM-DD)
+       - date (活動日期，如果是單日請填 YYYY-MM-DD。如果是多日區間，格式為 YYYY-MM-DD/YYYY-MM-DD，例如 "2026-07-15/2026-07-19")
        - type (類型，必須是以下之一："講座"、"營隊"、"比賽"、"志工"、"休閒"、"其他")
        
     4. action: "add_expense" (記帳、新增一筆金錢消費/花費記錄)
@@ -1856,26 +1918,23 @@ def run_mode_b(today_dt):
     # 讀取今天活動資料庫中的活動，並作為固定行程（Busy Blocks）避開 (預設 09:00 - 17:00)
     if ACTIVITIES_DB_ID:
         try:
-            today_activity_filter = {
-                "filter": {
-                    "and": [
-                        {"property": "日期", "date": {"equals": today_str}}
-                    ]
-                }
-            }
-            today_activities = query_database_all(ACTIVITIES_DB_ID, today_activity_filter)
-            for act in today_activities:
+            all_activities = query_database_all(ACTIVITIES_DB_ID)
+            for act in all_activities:
                 name = get_title(act, "活動名稱")
                 a_type = get_select(act, "類型") or "其他"
-                # 預設將活動排在 09:00 - 17:00 區間作為固定行程
-                fixed_events.append({
-                    "name": f"活動：{name}",
-                    "start": 9 * 60,
-                    "end": 17 * 60,
-                    "type": a_type,
-                    "is_user_event": True  # 不需要再寫回行事曆中，因為本來就存在於活動資料庫中
-                })
-                print(f"偵測到今日活動，已加入固定行程: {name}")
+                date_obj = act.get("properties", {}).get("日期", {}).get("date")
+                if date_obj:
+                    start_date = date_obj.get("start")
+                    end_date = date_obj.get("end") or start_date
+                    if start_date <= today_str <= end_date:
+                        fixed_events.append({
+                            "name": f"活動：{name}",
+                            "start": 9 * 60,
+                            "end": 17 * 60,
+                            "type": a_type,
+                            "is_user_event": True
+                        })
+                        print(f"偵測到今日活動 (活動期間: {start_date} 至 {end_date})，已加入固定行程: {name}")
         except Exception as e:
             print(f"讀取今日活動失敗: {e}")
 
@@ -1924,7 +1983,8 @@ def run_mode_b(today_dt):
         name = get_title(t, "名稱")
         processed_todo_ids.add(t["id"])
         
-        duration = 90 if t_type in ["小考", "段考"] else (15 if t_type in ["回條", "報名表"] else DEFAULT_DURATION.get(t_type, 45))
+        fallback_dur = 90 if t_type in ["小考", "段考"] else (15 if t_type in ["回條", "報名表"] else DEFAULT_DURATION.get(t_type, 45))
+        duration = get_todo_duration(name, fallback_dur)
         if sub in weighted_subjects:
             duration = int(duration * 1.3)
             
@@ -1950,7 +2010,7 @@ def run_mode_b(today_dt):
         # 若是未來段考或包含「報告」的作業，提早每天排入 45 分鐘準備
         if t_type == "段考" or (t_type == "作業" and "報告" in name):
             processed_todo_ids.add(t["id"])
-            duration = 45
+            duration = get_todo_duration(name, 45)
             if sub in weighted_subjects:
                 duration = int(duration * 1.3)
                 
@@ -1973,7 +2033,8 @@ def run_mode_b(today_dt):
         sub = get_rich_text(t, "相關科目") or "無"
         name = get_title(t, "名稱")
         
-        duration = DEFAULT_DURATION.get(t_type, 45)
+        fallback_dur = DEFAULT_DURATION.get(t_type, 45)
+        duration = get_todo_duration(name, fallback_dur)
         if sub in weighted_subjects:
             duration = int(duration * 1.3)
             
@@ -2355,6 +2416,7 @@ def run_mode_b(today_dt):
 
     # 7. 隨手記一日總結與碎片提取整合
     daily_summary_text = ""
+    memos = []
     if TEMP_INBOX_DB_ID:
         try:
             inbox_filter = {
@@ -2387,13 +2449,14 @@ def run_mode_b(today_dt):
                 inbox_texts_str = "\n".join(inbox_texts)
                 
                 prompt = f"""
-                請分析以下使用者今天隨手記下的碎片文字與照片，完成兩件事：
+                請分析以下使用者今天隨手記下的碎片文字與照片，完成三件事：
                 
                 1. 撰寫一篇溫馨、生動、完整的【一日總結】（日記）。請以繁體中文撰寫，字數約 150-300 字。
-                2. 從這些碎片資料中，分析並提取出以下三類標準資料（若無則不提取）：
+                2. 提取出所有不屬於學業課業、消費記帳、具體活動行程的【一般雜項備忘/提醒】（例如「去pc拿水壺」、「打電話給媽媽」），整理為 memos 陣列。
+                3. 從這些碎片資料中，分析並提取出以下三類標準資料（若無則不提取）：
                    - "add_expense" (消費/記帳記錄)：提取 name(品項), amount(金額，整數), category(分類: 飲食、交通、娛樂、學習)
-                   - "add_todo" (學校作業/小考待辦)：提取 name(簡短事項描述), subject(科目), due_date(格式 YYYY-MM-DD，若無為 "#"), type(作業、小考、段考、回條、報名表)
-                   - "add_activity" (一次性活動)：提取 name(活動名稱), date(格式 YYYY-MM-DD), type(講座、營隊、比賽、志工、休閒、其他)
+                   - "add_todo" (學校作業/小考待辦)：提取 name(簡短事項描述。若提及了需時，例如「需3小時」、「需180分鐘」，請在 name 的末尾加上「 (需X小時)」或「 (需X分鐘)」，例如「英文補課 (需3小時)」), subject(科目), due_date(格式 YYYY-MM-DD，若無為 "#"), type(作業、小考、段考、回條、報名表)
+                   - "add_activity" (一次性活動)：提取 name(活動名稱), date(格式 YYYY-MM-DD，若是跨日範圍如「7/15-7/19」請填「YYYY-MM-DD/YYYY-MM-DD」，例如「2026-07-15/2026-07-19」), type(講座、營隊、比賽、志工、休閒、其他)
                    
                 碎片文字內容如下：
                 {inbox_texts_str}
@@ -2401,6 +2464,9 @@ def run_mode_b(today_dt):
                 請務必以 JSON 格式回覆，結構如下（不要包含 ```json 等 markdown 標記）：
                 {{
                   "daily_summary": "今日的一日總結內容...",
+                  "memos": [
+                    "去pc拿水壺"
+                  ],
                   "actions": [
                     {{
                       "action": "add_expense",
@@ -2418,6 +2484,7 @@ def run_mode_b(today_dt):
                     
                 res_json = safe_load_json(response.text)
                 daily_summary_text = res_json.get("daily_summary", "")
+                memos = res_json.get("memos", [])
                 actions = res_json.get("actions", [])
                 
                 # 處理提取的動作
@@ -2446,11 +2513,24 @@ def run_mode_b(today_dt):
                             print(f"已從隨手記自動寫入待辦: {d.get('name')}")
                     elif action_type == "add_activity":
                         if ACTIVITIES_DB_ID:
+                            date_val = d.get("date", today_str)
+                            start_date = date_val.strip()
+                            end_date = None
+                            if "/" in date_val:
+                                parts = date_val.split("/")
+                                start_date = parts[0].strip()
+                                end_date = parts[1].strip()
+                            
+                            date_prop = {"start": start_date}
+                            if end_date:
+                                date_prop["end"] = end_date
+                                
                             create_page(ACTIVITIES_DB_ID, {
                                 "活動名稱": {"title": [{"text": {"content": d.get("name", "未命名活動")}}]},
-                                "日期": {"date": {"start": d.get("date", today_str)}},
+                                "日期": {"date": date_prop},
                                 "類型": {"select": {"name": d.get("type", "其他")}}
                             })
+                            write_activity_to_gcal(d.get("name"), date_val, d.get("type", "其他"))
                             print(f"已從隨手記自動寫入活動: {d.get('name')}")
                             
                 # 清理已處理的暫存資料
@@ -2461,8 +2541,14 @@ def run_mode_b(today_dt):
         except Exception as e:
             print(f"隨手記暫存與一日總結處理失敗: {e}")
 
+    memos_section = ""
+    if memos:
+        memos_section = "\n\n【今日雜項提醒】\n" + "\n".join([f"  ● {x}" for x in memos])
+
     if daily_summary_text:
         telegram_msg += f"\n\n【一日生活總結】\n{daily_summary_text}"
+    if memos_section:
+        telegram_msg += memos_section
 
     send_telegram_message(telegram_msg)
 

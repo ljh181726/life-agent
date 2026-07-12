@@ -283,8 +283,8 @@ def mock_make_gcal_request(method, url, headers=None, **kwargs):
         if "/events" in url:
             json_body = kwargs.get("json", {})
             summary = json_body.get("summary")
-            start = json_body.get("start", {}).get("dateTime")
-            end = json_body.get("end", {}).get("dateTime")
+            start_val = json_body.get("start", {}).get("dateTime") or json_body.get("start", {}).get("date") or ""
+            end_val = json_body.get("end", {}).get("dateTime") or json_body.get("end", {}).get("date") or ""
             color_id = json_body.get("colorId")
             ext_props = json_body.get("extendedProperties", {})
             
@@ -298,7 +298,11 @@ def mock_make_gcal_request(method, url, headers=None, **kwargs):
                 "extendedProperties": ext_props
             }
             mock_gcal_events.append(new_event)
-            print(f"[Google Calendar Mock API] 已建立行程: {start[11:16]}-{end[11:16]} [{color_id}] {summary}")
+            if "T" in start_val:
+                time_range_str = f"{start_val[11:16]}-{end_val[11:16]}"
+            else:
+                time_range_str = f"{start_val} 至 {end_val} (全天)"
+            print(f"[Google Calendar Mock API] 已建立行程: {time_range_str} [{color_id}] {summary}")
             return MockResponse(new_event, 200)
     elif method == "DELETE":
         parts = url.split("/")
@@ -328,7 +332,10 @@ def mock_safe_generate_content(model, *args, **kwargs):
             def __init__(self, text):
                 self.text = text
         return MockGenerativeResponse(json.dumps({
-            "daily_summary": "今天過得非常充實，晚上吃美味的麥當勞犒賞自己。同時也提醒自己要交物理報告，繼續努力！",
+            "daily_summary": "今天過得非常充實，晚上吃美味的麥當勞犒賞自己。同時也提醒自己要英文補課，繼續努力！",
+            "memos": [
+                "去pc拿水壺"
+            ],
             "actions": [
                 {
                     "action": "add_expense",
@@ -336,7 +343,11 @@ def mock_safe_generate_content(model, *args, **kwargs):
                 },
                 {
                     "action": "add_todo",
-                    "data": {"name": "物理報告", "subject": "物理", "due_date": "2026-06-22", "type": "作業"}
+                    "data": {"name": "英文補課 (需3小時)", "subject": "英文", "due_date": "2026-06-22", "type": "作業"}
+                },
+                {
+                    "action": "add_activity",
+                    "data": {"name": "YTP比賽", "date": "2026-07-15/2026-07-19", "type": "比賽"}
                 }
             ]
         }))
