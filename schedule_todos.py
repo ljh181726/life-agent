@@ -76,6 +76,8 @@ study_cal = (os.environ.get("GOOGLE_CALENDAR_ID_STUDY") or
              os.environ.get("GOOGLE_CALENDAR_ID") or "primary")
 task_cal = (os.environ.get("GOOGLE_CALENDAR_ID_TASK") or
             os.environ.get("GOOGLE_CALENDAR_ID") or "primary")
+class_cal = (os.environ.get("GOOGLE_CALENDAR_ID_CLASS") or
+             os.environ.get("GOOGLE_CALENDAR_ID") or "primary")
 
 gcal_h = {"Authorization": f"Bearer {gcal_token}", "Content-Type": "application/json"}
 notion_h = {"Authorization": f"Bearer {NOTION_TOKEN}",
@@ -116,33 +118,134 @@ def parse_iso(iso_str):
         return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
     return datetime.fromisoformat(iso_str).replace(tzinfo=None)
 
+def parse_duration_from_name(name):
+    import re
+    match_min = re.search(r"\(需(\d+)分鐘\)", name)
+    match_hr = re.search(r"\(需([\d\.]+)小時\)", name)
+    if match_min:
+        return float(match_min.group(1)) / 60.0
+    elif match_hr:
+        return float(match_hr.group(1))
+    return None
+
+def create_notion_todo(name, subject, due_date):
+    url = "https://api.notion.com/v1/pages"
+    payload = {
+        "parent": {"database_id": TODO_DB_ID},
+        "properties": {
+            "名稱": {"title": [{"text": {"content": name}}]},
+            "類型": {"select": {"name": "作業"}},
+            "相關科目": {"rich_text": [{"text": {"content": subject}}]},
+            "截止或考試日期": {"date": {"start": due_date}},
+            "總頁數/題數": {"number": 1},
+            "已完成頁數/題數": {"number": 0}
+        }
+    }
+    r = requests.post(url, headers=notion_h, json=payload)
+    if r.status_code == 200:
+        print(f"  [Notion] 自動建立重複補習作業: {name} (截止: {due_date})")
+        return True
+    else:
+        print(f"  [Notion] 建立補習作業失敗 {name}: {r.status_code} - {r.text}")
+        return False
+
+def auto_generate_cram_homeworks(existing_todos):
+    print("正在檢查未來 10 天是否有補習班課程，以自動生成作業...")
+    time_min = datetime.now().isoformat() + "+08:00"
+    time_max = (datetime.now() + timedelta(days=10)).isoformat() + "+08:00"
+    params = {"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "maxResults": 250, "orderBy": "startTime"}
+    r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{class_cal}/events", headers=gcal_h, params=params)
+    
+    if r.status_code != 200:
+        print(f"無法讀取課程日曆: {r.status_code}")
+        return False
+        
+    created_any = False
+    existing_names = {get_text(p, "名稱") for p in existing_todos}
+    
+    for item in r.json().get("items", []):
+        summary = item.get("summary", "")
+        start_str = item.get("start", {}).get("dateTime", "") or item.get("start", {}).get("date", "")
+        if not start_str:
+            continue
+            
+        dt_str = start_str[:10]
+        dt = datetime.strptime(dt_str, "%Y-%m-%d")
+        m_d = f"{dt.month}/{dt.day}"
+        
+        cram_info = None
+        if "PC化學" in summary:
+            cram_info = {
+                "subject": "化學",
+                "part1_dur": 1.5, "part2_dur": 1.5,
+                "part1_due": (dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "part2_due": (dt + timedelta(days=7)).strftime("%Y-%m-%d") # 下一週上課前
+            }
+        elif "PC物理" in summary:
+            cram_info = {
+                "subject": "物理",
+                "part1_dur": 0.5, "part2_dur": 0.5,
+                "part1_due": (dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "part2_due": (dt + timedelta(days=7)).strftime("%Y-%m-%d") # 下一週上課前
+            }
+        elif "PC數學" in summary:
+            cram_info = {
+                "subject": "數學",
+                "part1_dur": 1.25, "part2_dur": 1.25,
+                "part1_due": (dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "part2_due": (dt + timedelta(days=7)).strftime("%Y-%m-%d") # 下一週上課前
+            }
+            
+        if cram_info:
+            sub = cram_info["subject"]
+            name_1 = f"PC{sub}作業 Part 1 ({m_d}) (需{cram_info['part1_dur']}小時)"
+            name_2 = f"PC{sub}作業 Part 2 ({m_d}) (需{cram_info['part2_dur']}小時)"
+            
+            if name_1 not in existing_names:
+                if create_notion_todo(name_1, sub, cram_info["part1_due"]):
+                    created_any = True
+            if name_2 not in existing_names:
+                if create_notion_todo(name_2, sub, cram_info["part2_due"]):
+                    created_any = True
+                    
+    return created_any
+
 # ── 1. Fetch Notion todos ───────────────────────────────────────────
-print("正在從 Notion 讀取未完成的作業/待辦...")
-notion_todos = []
-has_more = True
-cursor = None
-while has_more:
-    payload = {}
-    if cursor:
-        payload["start_cursor"] = cursor
-    res = requests.post(f"https://api.notion.com/v1/databases/{TODO_DB_ID}/query",
-                        headers=notion_h, json=payload)
-    if res.status_code != 200:
-        print(f"Notion 查詢失敗: {res.status_code}")
-        break
-    d = res.json()
-    notion_todos.extend(d.get("results", []))
-    has_more = d.get("has_more", False)
-    cursor   = d.get("next_cursor")
+def fetch_all_notion_todos():
+    print("正在從 Notion 讀取未完成的作業/待辦...")
+    results = []
+    has_more = True
+    cursor = None
+    while has_more:
+        payload = {}
+        if cursor:
+            payload["start_cursor"] = cursor
+        res = requests.post(f"https://api.notion.com/v1/databases/{TODO_DB_ID}/query",
+                            headers=notion_h, json=payload)
+        if res.status_code != 200:
+            print(f"Notion 查詢失敗: {res.status_code}")
+            break
+        d = res.json()
+        results.extend(d.get("results", []))
+        has_more = d.get("has_more", False)
+        cursor   = d.get("next_cursor")
+    return results
+
+notion_todos = fetch_all_notion_todos()
+
+# Auto-generate cram school homeworks
+if auto_generate_cram_homeworks(notion_todos):
+    # Re-fetch if any new todos were created
+    notion_todos = fetch_all_notion_todos()
 
 today = datetime.now().date()
 todos = []
 for page in notion_todos:
+
     name     = get_text(page, "名稱")
     t_type   = get_select(page, "類型")
     subject  = get_text(page, "相關科目")
     due_str  = get_date(page, "截止或考試日期")
-    est_hr   = get_number(page, "預估時間（小時）")
     done_pg  = get_number(page, "已完成頁數/題數")
     total_pg = get_number(page, "總頁數/題數")
 
@@ -151,9 +254,11 @@ for page in notion_todos:
     if done_pg is not None and total_pg is not None and done_pg >= total_pg:
         continue
 
-    # Default duration: if not specified, default to 30 minutes (0.5 hours)
+    # Parse duration from name or fallback
+    est_hr = parse_duration_from_name(name)
     if est_hr is None:
         est_hr = 0.5
+
 
     todos.append({
         "notion_page_id": page["id"],
