@@ -46,6 +46,28 @@ jobs:
           NOTION_LEDGER_DB_ID: ${{ secrets.NOTION_LEDGER_DB_ID }}
           NOTION_WEEKLY_CALENDAR_DB_ID: ${{ secrets.NOTION_WEEKLY_CALENDAR_DB_ID }}
           NOTION_TEMP_INBOX_DB_ID: ${{ secrets.NOTION_TEMP_INBOX_DB_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          GOOGLE_CALENDAR_ID_CLASS: ${{ secrets.GOOGLE_CALENDAR_ID_CLASS }}
+          GOOGLE_CALENDAR_ID_STUDY: ${{ secrets.GOOGLE_CALENDAR_ID_STUDY }}
+          GOOGLE_CALENDAR_ID_TASK: ${{ secrets.GOOGLE_CALENDAR_ID_TASK }}
+          GOOGLE_CALENDAR_ID_ACTIVITY: ${{ secrets.GOOGLE_CALENDAR_ID_ACTIVITY }}
+          GOOGLE_CALENDAR_ID_MISC: ${{ secrets.GOOGLE_CALENDAR_ID_MISC }}
           SHORTCUT_PHOTO_URL: ${{ github.event.inputs.photo_url }}
           SHORTCUT_TEXT: ${{ github.event.inputs.text }}
         run: python main.py
+
+      - name: Sync Notion to Google Calendar
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TODO_ACTIVITIES_DB_ID: ${{ secrets.NOTION_TODO_ACTIVITIES_DB_ID }}
+          NOTION_ACTIVITIES_DB_ID: ${{ secrets.NOTION_ACTIVITIES_DB_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          GOOGLE_CALENDAR_ID_TASK: ${{ secrets.GOOGLE_CALENDAR_ID_TASK }}
+          GOOGLE_CALENDAR_ID_ACTIVITY: ${{ secrets.GOOGLE_CALENDAR_ID_ACTIVITY }}
+        run: python import_notion_to_gcal.py
