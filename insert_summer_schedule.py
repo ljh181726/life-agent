@@ -57,7 +57,7 @@ if not token:
     print("無法取得授權，終止執行。")
     sys.exit(1)
 
-calendar_id = os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
+calendar_id = os.environ.get("GOOGLE_CALENDAR_ID_CLASS") or os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
 url_create = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
 
 events = [

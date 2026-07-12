@@ -88,6 +88,11 @@ def write_activity_to_gcal(name, date_val, a_type):
     except Exception as e:
         print(f"同步活動至 Google Calendar 異常: {e}")
 
+def get_calendar_ids():
+    class_id = os.environ.get("GOOGLE_CALENDAR_ID_CLASS") or os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
+    study_id = os.environ.get("GOOGLE_CALENDAR_ID_STUDY") or os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
+    return class_id, study_id
+
 def get_google_calendar_access_token():
     if os.path.exists(TOKEN_CACHE_FILE):
         try:
@@ -972,28 +977,39 @@ def process_telegram_commands(today_dt):
                     if not access_token:
                         print("無法取得 Google Calendar Access Token，跳過匯入。")
                     else:
-                        calendar_id = os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
+                        class_calendar_id, study_calendar_id = get_calendar_ids()
                         dates_to_clear = {e.get("date") for e in events_list if e.get("date")}
                         for d in dates_to_clear:
                             time_min = f"{d}T00:00:00+08:00"
                             time_max = f"{d}T23:59:59+08:00"
-                            url_list = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
                             params = {
                                 "timeMin": time_min,
                                 "timeMax": time_max,
                                 "singleEvents": "true"
                             }
-                            res_list = make_gcal_request("GET", url_list, params=params)
+                            # Clear Class Calendar
+                            url_list_class = f"https://www.googleapis.com/calendar/v3/calendars/{class_calendar_id}/events"
+                            res_list = make_gcal_request("GET", url_list_class, params=params)
                             if res_list and res_list.status_code == 200:
-                                day_events = res_list.json().get("items", [])
-                                for ev_gcal in day_events:
-                                    description = ev_gcal.get("description") or ""
+                                for ev_gcal in res_list.json().get("items", []):
                                     is_bot = (
                                         ev_gcal.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent" or
-                                        "[Life-Agent 自動生成]" in description
+                                        "[Life-Agent 自動生成]" in (ev_gcal.get("description") or "")
                                     )
                                     if is_bot:
-                                        delete_google_calendar_event(access_token, calendar_id, ev_gcal["id"])
+                                        delete_google_calendar_event(access_token, class_calendar_id, ev_gcal["id"])
+                            # Clear Study Calendar (if different)
+                            if class_calendar_id != study_calendar_id:
+                                url_list_study = f"https://www.googleapis.com/calendar/v3/calendars/{study_calendar_id}/events"
+                                res_list = make_gcal_request("GET", url_list_study, params=params)
+                                if res_list and res_list.status_code == 200:
+                                    for ev_gcal in res_list.json().get("items", []):
+                                        is_bot = (
+                                            ev_gcal.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent" or
+                                            "[Life-Agent 自動生成]" in (ev_gcal.get("description") or "")
+                                        )
+                                        if is_bot:
+                                            delete_google_calendar_event(access_token, study_calendar_id, ev_gcal["id"])
                                         
                         for ev in events_list:
                             ev_date = ev.get("date")
@@ -1009,7 +1025,8 @@ def process_telegram_commands(today_dt):
                                 if ev_type in ["自習寫功課", "段考複習", "考試準備"]:
                                     color_id = "10"
                                     
-                                url_create = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+                                target_cal_id = class_calendar_id if ev_type == "上課" else study_calendar_id
+                                url_create = f"https://www.googleapis.com/calendar/v3/calendars/{target_cal_id}/events"
                                 payload = {
                                     "summary": ev_name,
                                     "description": "[Life-Agent 自動生成]\n由 Telegram 指令自動匯入",
@@ -1732,13 +1749,11 @@ def run_mode_b(today_dt):
         print("無法取得 Google Calendar Access Token，終止時間分配。")
         return
         
-    calendar_id = os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
+    class_calendar_id, study_calendar_id = get_calendar_ids()
     
     # 查詢今日 Google Calendar 事件
     time_min = f"{today_str}T00:00:00+08:00"
     time_max = f"{today_str}T23:59:59+08:00"
-    
-    url_list = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
     params = {
         "timeMin": time_min,
         "timeMax": time_max,
@@ -1746,78 +1761,119 @@ def run_mode_b(today_dt):
         "orderBy": "startTime"
     }
     
-    existing_events = []
-    res_list = make_gcal_request("GET", url_list, params=params)
+    class_events = []
+    url_list_class = f"https://www.googleapis.com/calendar/v3/calendars/{class_calendar_id}/events"
+    res_list = make_gcal_request("GET", url_list_class, params=params)
     if res_list and res_list.status_code == 200:
-        existing_events = res_list.json().get("items", [])
-    else:
-        print(f"取得 Google Calendar 行程失敗: {res_list.status_code if res_list else 'No Response'}")
+        class_events = res_list.json().get("items", [])
+        
+    study_events = []
+    if class_calendar_id != study_calendar_id:
+        url_list_study = f"https://www.googleapis.com/calendar/v3/calendars/{study_calendar_id}/events"
+        res_list = make_gcal_request("GET", url_list_study, params=params)
+        if res_list and res_list.status_code == 200:
+            study_events = res_list.json().get("items", [])
 
-    bot_event_ids_to_delete = []
+    bot_deleted_count = 0
     class_overrides = []
     other_fixed_events = []
+    existing_events = []
     
-    for event in existing_events:
-        event_id = event["id"]
-        name = event.get("summary") or "無標題行程"
-        description = event.get("description") or ""
-        
-        # 判斷是否為機器人自動生成
+    # Clear and process Class events
+    for ev in class_events:
         is_bot = (
-            event.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent" or
-            "[Life-Agent 自動生成]" in description
+            ev.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent" or
+            "[Life-Agent 自動生成]" in (ev.get("description") or "")
         )
-        
         if is_bot:
-            bot_event_ids_to_delete.append(event_id)
+            delete_google_calendar_event(access_token, class_calendar_id, ev["id"])
+            bot_deleted_count += 1
         else:
+            existing_events.append(ev)
+            name = ev.get("summary") or "無標題行程"
             is_cancellation = ("請假" in name or "停課" in name or "休息!" in name or "(休息!)" in name)
             if is_cancellation:
                 print(f"偵測到請假/停課標記行程 [{name}]，不將其視為忙碌區塊。")
                 continue
                 
-            start_data = event.get("start", {})
-            end_data = event.get("end", {})
+            start_data = ev.get("start", {})
+            end_data = ev.get("end", {})
             
             if "date" in start_data:
-                # 全天事件
-                ev = {
+                other_fixed_events.append({
                     "name": name,
                     "start": 9 * 60,
                     "end": 17 * 60,
                     "type": "上課",
                     "is_user_event": True
-                }
-                other_fixed_events.append(ev)
+                })
             elif "dateTime" in start_data:
                 try:
                     dt_start = datetime.fromisoformat(start_data["dateTime"])
                     dt_end = datetime.fromisoformat(end_data["dateTime"])
+                    sh, sm = (0, 0) if dt_start.date() < today_dt.date() else (dt_start.hour, dt_start.minute)
+                    eh, em = (24, 0) if dt_end.date() > today_dt.date() else (dt_end.hour, dt_end.minute)
                     
-                    if dt_start.date() < today_dt.date():
-                        sh, sm = 0, 0
-                    else:
-                        sh, sm = dt_start.hour, dt_start.minute
-                        
-                    if dt_end.date() > today_dt.date():
-                        eh, em = 24, 0
-                    else:
-                        eh, em = dt_end.hour, dt_end.minute
-                        
-                    ev = {
+                    ev_struct = {
                         "name": name,
                         "start": sh * 60 + sm,
                         "end": eh * 60 + em,
                         "type": "上課",
                         "is_user_event": True
                     }
-                    
                     if get_subject_budget(name) > 0:
-                        class_overrides.append(ev)
+                        class_overrides.append(ev_struct)
                     else:
-                        other_fixed_events.append(ev)
+                        other_fixed_events.append(ev_struct)
                     print(f"偵測到 Google Calendar 保留行程: {sh:02d}:{sm:02d}-{eh:02d}:{em:02d} {name}")
                 except Exception as e:
+                    print(f"解析保留行程失敗: {e}")
+
+    # Clear and process Study events (if different)
+    for ev in study_events:
+        is_bot = (
+            ev.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent" or
+            "[Life-Agent 自動生成]" in (ev.get("description") or "")
+        )
+        if is_bot:
+            delete_google_calendar_event(access_token, study_calendar_id, ev["id"])
+            bot_deleted_count += 1
+        else:
+            existing_events.append(ev)
+            name = ev.get("summary") or "無標題行程"
+            is_cancellation = ("請假" in name or "停課" in name or "休息!" in name or "(休息!)" in name)
+            if is_cancellation:
+                print(f"偵測到請假/停課標記行程 [{name}]，不將其視為忙碌區塊。")
+                continue
+                
+            start_data = ev.get("start", {})
+            end_data = ev.get("end", {})
+            
+            if "date" in start_data:
+                other_fixed_events.append({
+                    "name": name,
+                    "start": 9 * 60,
+                    "end": 17 * 60,
+                    "type": "休息",
+                    "is_user_event": True
+                })
+            elif "dateTime" in start_data:
+                try:
+                    dt_start = datetime.fromisoformat(start_data["dateTime"])
+                    dt_end = datetime.fromisoformat(end_data["dateTime"])
+                    sh, sm = (0, 0) if dt_start.date() < today_dt.date() else (dt_start.hour, dt_start.minute)
+                    eh, em = (24, 0) if dt_end.date() > today_dt.date() else (dt_end.hour, dt_end.minute)
+                    
+                    other_fixed_events.append({
+                        "name": name,
+                        "start": sh * 60 + sm,
+                        "end": eh * 60 + em,
+                        "type": "休息",
+                        "is_user_event": True
+                    })
+                    print(f"偵測到 Google Calendar 保留行程: {sh:02d}:{sm:02d}-{eh:02d}:{em:02d} {name}")
+                except Exception as e:
+                    print(f"解析保留行程失敗: {e}")
                     print(f"解析 Google Calendar 事件時間失敗 [{name}]: {e}")
                     
     for s in today_fixed_schedules:
@@ -2257,9 +2313,7 @@ def run_mode_b(today_dt):
     planned_events.sort(key=lambda x: (x["start"], x["end"]))
 
     # 5. 批次寫回 Google Calendar
-    for event_id in bot_event_ids_to_delete:
-        delete_google_calendar_event(access_token, calendar_id, event_id)
-    print(f"已清除 Google Calendar 今日自動生成行程共 {len(bot_event_ids_to_delete)} 筆。")
+    print(f"已清除 Google Calendar 今日自動生成行程共 {bot_deleted_count} 筆。")
 
     for event in planned_events:
         if event.get("is_user_event"):
@@ -2281,7 +2335,8 @@ def run_mode_b(today_dt):
         if event.get("note"):
             desc += f"\n備註：{event['note']}"
             
-        url_create = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+        target_cal_id = class_calendar_id if c_type == "上課" else study_calendar_id
+        url_create = f"https://www.googleapis.com/calendar/v3/calendars/{target_cal_id}/events"
         payload = {
             "summary": event["name"],
             "description": desc,
