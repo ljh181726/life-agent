@@ -1708,57 +1708,101 @@ def run_mode_a(today_dt):
         except Exception as e:
             print(f"讀取未處理活動失敗: {e}")
 
-        # 2. 書包物品精準檢查：計算今天放學要帶回的物品
-    # 預覽今晚至未來三天內讀書/作業所需之課本 (包含已逾期、未來3天內截止、或沒有設定截止日期的所有未完成任務科目)
-    preview_end_dt = today_dt + timedelta(days=2)
-    preview_end_str = preview_end_dt.strftime("%Y-%m-%d")
+    # 2. 傍晚通知邏輯：計算今天放學後到明早回學校前的補習與作業
+    take_home = []
+    cram_events_list = []
+    todo_events_list = []
     
-    raw_study_todos = query_database_all(TODO_ACTIVITIES_DB_ID)
-    study_todos = [t for t in raw_study_todos if not is_task_completed(t) and get_title(t, "名稱") and get_title(t, "名稱").strip() != ""]
-    future_study_subjects = {} # {科目: 標籤}
-    for t in study_todos:
-        due = get_date(t, "截止或考試日期")
-        # 篩選條件：無截止日期，或截止日期在未來3天之內(含逾期)
-        if not due or due <= preview_end_str:
-            sub = get_rich_text(t, "相關科目")
-            if sub and sub.lower() != "無":
-                t_type = get_select(t, "類型")
-                t_name = get_title(t, "名稱")
-                lbl = "功課複習"
-                if t_type in ["小考", "段考"]:
-                    lbl = "衝刺準備"
-                future_study_subjects[sub] = f"{lbl} ({t_name[:12]})"
+    try:
+        access_token = get_google_calendar_access_token()
+        if access_token:
+            class_calendar_id, _, task_calendar_id, _, _ = get_calendar_ids()
+            
+            time_min = f"{today_str}T17:00:00+08:00"
+            time_max = f"{tomorrow_str}T08:00:00+08:00"
+            params_gcal = {
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "singleEvents": "true",
+                "orderBy": "startTime"
+            }
+            
+            url_class = f"https://www.googleapis.com/calendar/v3/calendars/{class_calendar_id}/events"
+            res_class = make_gcal_request("GET", url_class, params=params_gcal)
+            if res_class and res_class.status_code == 200:
+                for ev in res_class.json().get("items", []):
+                    summary = ev.get("summary", "")
+                    if "PC" in summary:
+                        start_time_str = ev.get("start", {}).get("dateTime", "")
+                        end_time_str = ev.get("end", {}).get("dateTime", "")
+                        start_formatted = start_time_str[11:16] if start_time_str else ""
+                        end_formatted = end_time_str[11:16] if end_time_str else ""
+                        cram_events_list.append((summary, f"{start_formatted}~{end_formatted}"))
+            
+            url_task = f"https://www.googleapis.com/calendar/v3/calendars/{task_calendar_id}/events"
+            res_task = make_gcal_request("GET", url_task, params=params_gcal)
+            if res_task and res_task.status_code == 200:
+                for ev in res_task.json().get("items", []):
+                    if ev.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent":
+                        summary = ev.get("summary", "")
+                        start_time_str = ev.get("start", {}).get("dateTime", "")
+                        end_time_str = ev.get("end", {}).get("dateTime", "")
+                        start_formatted = start_time_str[11:16] if start_time_str else ""
+                        end_formatted = end_time_str[11:16] if end_time_str else ""
+                        desc = ev.get("description", "")
+                        todo_events_list.append((summary, f"{start_formatted}~{end_formatted}", desc))
 
-    # 讀取教科書位置追蹤庫
-    tracker_results = query_database_all(BOOK_TRACKER_DB_ID)
-    location_tracker = {} # {物品名稱: (目前位置, page_id)}
-    for r in tracker_results:
-        name = get_title(r, "科目/物品名稱")
-        loc = get_select(r, "目前位置")
-        if name:
-            location_tracker[name] = (loc, r["id"])
+        unique_subjects = set()
+        
+        def parse_subject_from_title(title, desc=""):
+            if desc:
+                import re
+                m = re.search(r"科目：\s*([^\n]+)", desc)
+                if m:
+                    return m.group(1).strip()
+            for subj in ["數學", "物理", "英文", "歷史", "地科", "化學", "國文", "生物", "地理", "公民"]:
+                if subj in title:
+                    return subj
+            return None
 
-    # 計算今天放學要帶回的物品 (狀態在家裡 -> 忽略；狀態在學校 -> 要帶回)
-    take_home = [] # list of tuples: (item, label, page_id)
-    for item, label in future_study_subjects.items():
-        if item in location_tracker:
-            loc, page_id = location_tracker[item]
-            if loc == "在學校":
-                take_home.append((item, label, page_id))
-        else:
-            # 追蹤庫中沒有的物品，預設新增且預設在學校 (以便之後提示需要帶回)
-            try:
-                new_pg = create_page(BOOK_TRACKER_DB_ID, {
-                    "科目/物品名稱": {"title": [{"text": {"content": item}}]},
-                    "目前位置": {"select": {"name": "在學校"}}
-                })
-                page_id = new_pg.get("id")
-                if page_id:
-                    take_home.append((item, label, page_id))
-            except Exception as e:
-                print(f"新增書籍追蹤頁面失敗 {item}: {e}")
+        for summary, _ in cram_events_list:
+            subj = parse_subject_from_title(summary)
+            if subj:
+                unique_subjects.add(subj)
+                
+        for summary, _, desc in todo_events_list:
+            subj = parse_subject_from_title(summary, desc)
+            if subj:
+                unique_subjects.add(subj)
 
-    take_home.sort(key=lambda x: x[0])
+        tracker_results = query_database_all(BOOK_TRACKER_DB_ID)
+        location_tracker = {}
+        for r in tracker_results:
+            name = get_title(r, "科目/物品名稱")
+            loc = get_select(r, "目前位置")
+            if name:
+                location_tracker[name] = (loc, r["id"])
+
+        for subj in unique_subjects:
+            if subj in location_tracker:
+                loc, page_id = location_tracker[subj]
+                if loc == "在學校":
+                    take_home.append((subj, "功課與補習", page_id))
+            else:
+                try:
+                    new_pg = create_page(BOOK_TRACKER_DB_ID, {
+                        "科目/物品名稱": {"title": [{"text": {"content": subj}}]},
+                        "目前位置": {"select": {"name": "在學校"}},
+                        "Currently_At": {"select": {"name": "在學校"}}
+                    })
+                    page_id = new_pg.get("id")
+                    if page_id:
+                        take_home.append((subj, "功課與補習", page_id))
+                except Exception as e:
+                    print(f"建立書籍追蹤頁面失敗 {subj}: {e}")
+        take_home.sort(key=lambda x: x[0])
+    except Exception as e:
+        print(f"傍晚通知計算失敗: {e}")
 
     # 3. 記帳統計與 Telegram 發送
     today_ledger_filter = {
@@ -1771,7 +1815,9 @@ def run_mode_a(today_dt):
     today_ledgers = query_database_all(LEDGER_DB_ID, today_ledger_filter)
     total_spend = sum([get_number(x, "金額") or 0 for x in today_ledgers])
 
-    # 組裝 Telegram 訊息
+    cram_detail = "\n".join([f"  ● {item} ({time_str})" for item, time_str in cram_events_list]) if cram_events_list else "  無"
+    todo_detail = "\n".join([f"  ● {item} ({time_str})" for item, time_str, _ in todo_events_list]) if todo_events_list else "  無"
+    
     if take_home:
         take_home_section = "\n".join([f"  [ ] {x[0]} ({x[1]})" for x in take_home])
         inline_buttons = []
@@ -1780,7 +1826,7 @@ def run_mode_a(today_dt):
             inline_buttons.append([{"text": f"✅ 已將 {x[0]} 帶回家", "callback_data": f"bh:{short_id}"}])
         reply_markup = {"inline_keyboard": inline_buttons}
     else:
-        take_home_section = "  今天放學無須帶 any 書本回家。"
+        take_home_section = "  無須帶 any 書本回家。"
         reply_markup = None
 
     if total_spend > 0:
@@ -1790,11 +1836,20 @@ def run_mode_a(today_dt):
 
     telegram_msg = f"""【Life-Agent 傍晚通知 - 書包檢查與記帳】
 
-[今天放學必帶回包包！]
+[離開學校後到回學校前的補習與作業]
+--------------------------------
+補習日程：
+{cram_detail}
+
+作業排程：
+{todo_detail}
+--------------------------------
+
+[放學必帶回家的科目]
 --------------------------------
 {take_home_section}
 --------------------------------
-(帶回家的課本將供今晚與未來幾天的學習排程使用)
+(請確認相關科目的課本/講義已放入包包)
 
 [今日消費統計]
 {expense_section}"""
@@ -2503,41 +2558,72 @@ def run_mode_b(today_dt):
     except Exception as e:
         print(f"書籍位置狀態自動轉移失敗: {e}")
 
-    # 5.8 計算出門要帶去的物品 (明早出門必帶)
+    # 5.8 計算出門要帶去的物品 (回學校前要準備的補習、作業與課堂)
+    bring_to_school = []
+    today_cram_list = []
+    today_todo_list = []
     try:
-        today_subjects_to_bring = {get_title(s, "科目名稱") for s in today_fixed_schedules if get_title(s, "科目名稱")}
+        today_school_subjects = {get_title(s, "科目名稱") for s in today_fixed_schedules if get_title(s, "科目名稱")}
         
-        todo_today_filter = {
-            "filter": {
-                "and": [
-                    {"property": "截止或考試日期", "date": {"equals": today_str}}
-                ]
-            }
+        time_min_b = f"{today_str}T08:00:00+08:00"
+        time_max_b = f"{today_str}T23:59:59+08:00"
+        params_b = {
+            "timeMin": time_min_b,
+            "timeMax": time_max_b,
+            "singleEvents": "true",
+            "orderBy": "startTime"
         }
-        today_todos = query_database_all(TODO_ACTIVITIES_DB_ID, todo_today_filter)
         
-        today_required_items = {}
-        for sub in today_subjects_to_bring:
-            today_required_items[sub] = "課堂課本"
+        res_class_b = make_gcal_request("GET", f"https://www.googleapis.com/calendar/v3/calendars/{class_calendar_id}/events", params=params_b)
+        if res_class_b and res_class_b.status_code == 200:
+            for ev in res_class_b.json().get("items", []):
+                summary = ev.get("summary", "")
+                if "PC" in summary:
+                    start_time_str = ev.get("start", {}).get("dateTime", "")
+                    start_formatted = start_time_str[11:16] if start_time_str else ""
+                    today_cram_list.append((summary, start_formatted))
+                    
+        res_task_b = make_gcal_request("GET", f"https://www.googleapis.com/calendar/v3/calendars/{task_calendar_id}/events", params=params_b)
+        if res_task_b and res_task_b.status_code == 200:
+            for ev in res_task_b.json().get("items", []):
+                if ev.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent":
+                    summary = ev.get("summary", "")
+                    start_time_str = ev.get("start", {}).get("dateTime", "")
+                    start_formatted = start_time_str[11:16] if start_time_str else ""
+                    desc = ev.get("description", "")
+                    today_todo_list.append((summary, start_formatted, desc))
+
+        today_required_subjects = set(today_school_subjects)
+        
+        def parse_subject_from_title_b(title, desc=""):
+            if desc:
+                import re
+                m = re.search(r"科目：\s*([^\n]+)", desc)
+                if m:
+                    return m.group(1).strip()
+            for subj in ["數學", "物理", "英文", "歷史", "地科", "化學", "國文", "生物", "地理", "公民"]:
+                if subj in title:
+                    return subj
+            return None
+
+        subj_sources = {}
+        for sub in today_school_subjects:
+            subj_sources[sub] = "課堂"
             
-        for t in today_todos:
-            t_name = get_title(t, "名稱")
-            if not t_name or t_name.strip() == "":
-                continue
-            sub = get_rich_text(t, "相關科目")
-            t_type = get_select(t, "類型")
-            
-            label = "當天作業"
-            if t_type in ["回條", "報名表"]:
-                label = "重要回條"
-            elif t_type in ["小考", "段考"]:
-                label = "考試科目"
+        for summary, _ in today_cram_list:
+            subj = parse_subject_from_title_b(summary)
+            if subj:
+                today_required_subjects.add(subj)
+                existing_src = subj_sources.get(subj, "")
+                subj_sources[subj] = f"{existing_src}+補習" if existing_src else "補習"
                 
-            if sub and sub.lower() != "無":
-                today_required_items[sub] = label
-            else:
-                today_required_items[t_name] = label
-                
+        for summary, _, desc in today_todo_list:
+            subj = parse_subject_from_title_b(summary, desc)
+            if subj:
+                today_required_subjects.add(subj)
+                existing_src = subj_sources.get(subj, "")
+                subj_sources[subj] = f"{existing_src}+作業" if existing_src else "作業"
+
         tracker_results = query_database_all(BOOK_TRACKER_DB_ID)
         location_tracker = {}
         for r in tracker_results:
@@ -2545,43 +2631,56 @@ def run_mode_b(today_dt):
             loc = get_select(r, "目前位置")
             if name:
                 location_tracker[name] = (loc, r["id"])
-                
-        bring_to_school = []
-        for item, label in today_required_items.items():
-            if item in location_tracker:
-                loc, page_id = location_tracker[item]
+
+        for subj in today_required_subjects:
+            label = subj_sources.get(subj, "課堂")
+            if subj in location_tracker:
+                loc, page_id = location_tracker[subj]
                 if loc == "在家裡":
-                    bring_to_school.append((item, label, page_id))
+                    bring_to_school.append((subj, label, page_id))
             else:
                 try:
                     new_pg = create_page(BOOK_TRACKER_DB_ID, {
-                        "科目/物品名稱": {"title": [{"text": {"content": item}}]},
+                        "科目/物品名稱": {"title": [{"text": {"content": subj}}]},
                         "Currently_At": {"select": {"name": "在家裡"}},
                         "目前位置": {"select": {"name": "在家裡"}}
                     })
                     page_id = new_pg.get("id")
                     if page_id:
-                        bring_to_school.append((item, label, page_id))
+                        bring_to_school.append((subj, label, page_id))
                 except Exception as e:
-                    print(f"建立書籍追蹤頁面失敗 {item}: {e}")
+                    print(f"建立書籍追蹤頁面失敗 {subj}: {e}")
         bring_to_school.sort(key=lambda x: x[0])
     except Exception as e:
         print(f"計算出門攜帶物品失敗: {e}")
         bring_to_school = []
 
     # 6. Telegram 發送明早出門帶書通知
+    cram_detail_b = "\n".join([f"  ● {item} ({time_str})" for item, time_str in today_cram_list]) if today_cram_list else "  無"
+    todo_detail_b = "\n".join([f"  ● {item} ({time_str})" for item, time_str, _ in today_todo_list]) if today_todo_list else "  無"
+
     if bring_to_school:
         bring_to_school_section = "\n".join([f"  [ ] {x[0]} ({x[1]})" for x in bring_to_school])
     else:
         bring_to_school_section = "  今日無須帶任何課本/物品去學校。"
 
-    telegram_msg = f"""【Life-Agent 晨間通知 - 書包檢查】
+    telegram_msg = f"""【Life-Agent 晨間通知 - 書包檢查與日程】
 
-[明早出門必帶去學校！]
+[今天在學校與回學校後的補習與作業]
+--------------------------------
+當天課程科目：{', '.join(today_school_subjects) if today_school_subjects else '無'}
+補習日程：
+{cram_detail_b}
+
+作業排程：
+{todo_detail_b}
+--------------------------------
+
+[回學校前必帶去學校的科目]
 --------------------------------
 {bring_to_school_section}
 --------------------------------
-(作息日程已安排至 Google Calendar，請前往日曆查看詳細時間)"""
+(請確認相關科目的課本/講義已放入包包)"""
 
     # 7. 隨手記一日總結與碎片提取整合
     daily_summary_text = ""
