@@ -11,3 +11,6 @@ env/
 venv/
 .venv/
 holiday_cache.json
+.gcal_token_cache.json
+incomplete_reported.json
+

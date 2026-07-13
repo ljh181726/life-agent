@@ -276,7 +276,7 @@ HEADERS = {
 
 # 預估時間基準值 (分鐘)
 DEFAULT_DURATION = {
-    "作業": 45,
+    "作業": 30,
     "小考": 60,
     "段考": 120,
     "回條": 10,
@@ -415,7 +415,7 @@ def is_task_completed(page):
 
 # ==================== Telegram Bot ====================
 
-def send_telegram_message(message):
+def send_telegram_message(message, reply_markup=None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未設定，無法發送 Telegram 通知。")
         return
@@ -424,6 +424,8 @@ def send_telegram_message(message):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         res = request_with_retry("POST", url, json=payload)
         res.raise_for_status()
@@ -621,6 +623,76 @@ def process_telegram_commands(today_dt):
         if update_id > max_update_id:
             max_update_id = update_id
             
+        callback_query = update.get("callback_query")
+        if callback_query:
+            cq_id = callback_query.get("id")
+            data = callback_query.get("data", "")
+            if data.startswith("bh:") or data.startswith("bs:"):
+                short_id = data.split(":", 1)[1]
+                page_id = f"{short_id[:8]}-{short_id[8:12]}-{short_id[12:16]}-{short_id[16:20]}-{short_id[20:]}"
+                try:
+                    res_notion = requests.get(f"https://api.notion.com/v1/pages/{page_id}", headers=HEADERS)
+                    if res_notion.status_code == 200:
+                        page_data = res_notion.json()
+                        current_loc = get_select(page_data, "目前位置")
+                        target_loc = "在家裡" if data.startswith("bh:") else "在學校"
+                        if current_loc == target_loc:
+                            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={
+                                "callback_query_id": cq_id,
+                                "text": f"狀態已更新過囉！目前已是「{current_loc}」"
+                            })
+                            continue
+                        update_page(page_id, {"目前位置": {"select": {"name": target_loc}}})
+                        update_page(page_id, {"Currently_At": {"select": {"name": target_loc}}})
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={
+                            "callback_query_id": cq_id,
+                            "text": f"已將課本位置更新為：{target_loc}"
+                        })
+                        send_telegram_message(f"已確認更新：{get_title(page_data, '科目/物品名稱')} -> {target_loc}")
+                    else:
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={
+                            "callback_query_id": cq_id,
+                            "text": "查無此書籍項目"
+                        })
+                except Exception as ex:
+                    print(f"更新失敗: {ex}")
+                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={
+                        "callback_query_id": cq_id,
+                        "text": f"更新出錯: {ex}"
+                    })
+            elif data.startswith("td:"):
+                short_id = data.split(":", 1)[1]
+                page_id = f"{short_id[:8]}-{short_id[8:12]}-{short_id[12:16]}-{short_id[16:20]}-{short_id[20:]}"
+                try:
+                    res_notion = requests.get(f"https://api.notion.com/v1/pages/{page_id}", headers=HEADERS)
+                    if res_notion.status_code == 200:
+                        page_data = res_notion.json()
+                        done_val = get_number(page_data, "已完成頁數/題數")
+                        total_val = get_number(page_data, "總頁數/題數") or 1
+                        if done_val is not None and done_val >= total_val:
+                            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={
+                                "callback_query_id": cq_id,
+                                "text": "此作業早已完成了！"
+                            })
+                            continue
+                        update_page(page_id, {"已完成頁數/題數": {"number": total_val}})
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={
+                            "callback_query_id": cq_id,
+                            "text": "已將作業標記為完成！"
+                        })
+                        send_telegram_message(f"已確認完成作業：{get_title(page_data, '名稱')}")
+                    else:
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={
+                            "callback_query_id": cq_id,
+                            "text": "查無此作業項目"
+                        })
+                except Exception as ex:
+                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={
+                        "callback_query_id": cq_id,
+                        "text": f"更新出錯: {ex}"
+                    })
+            continue
+
         message = update.get("message")
         if not message:
             continue
@@ -679,32 +751,16 @@ def process_telegram_commands(today_dt):
                     send_telegram_message(f"已自動分析並新增待辦：{name} (科目: {subject}{due_msg})")
                     
                 elif action == "complete_todo":
-                    name = data.get("name")
-                    actual_time_str = data.get("actual_time")
-                    time_spent = None
-                    if actual_time_str and actual_time_str != "#":
-                        try:
-                            time_spent = int(actual_time_str)
-                        except:
-                            pass
-                            
-                    if not name or name == "#":
-                        send_telegram_message("無法識別要完成的事項名稱。")
-                        continue
-                        
-                    # 搜尋未完成的任務
-                    query = {
-                        "filter": {
-                            "and": [
-                                {"property": "名稱", "title": {"contains": name}}
-                            ]
-                        }
-                    }
-                    results = query_database_all(TODO_ACTIVITIES_DB_ID, query)
-                    uncompleted = [r for r in results if not is_task_completed(r)]
-                    if uncompleted:
-                        target = uncompleted[0]
+                    name = data.get("name") or text
+                    target = find_notion_todo_fuzzy(name)
+                    if target:
                         total_pages = get_number(target, "總頁數/題數") or 1
+                        time_spent = None
+                        if data.get("actual_time") and data.get("actual_time") != "#":
+                            try:
+                                time_spent = int(data.get("actual_time"))
+                            except:
+                                pass
                         update_properties = {
                             "已完成頁數/題數": {"number": total_pages}
                         }
@@ -714,7 +770,32 @@ def process_telegram_commands(today_dt):
                         time_msg = f"，耗時 {time_spent} 分鐘" if time_spent is not None else ""
                         send_telegram_message(f"已將待辦【{get_title(target, '名稱')}】標記為完成{time_msg}。")
                     else:
-                        send_telegram_message(f"找不到名稱包含【{name}】且未完成的待辦事項。")
+                        send_telegram_message(f"找不到符合「{name}」的未完成待辦事項。")
+                        
+                elif action == "incomplete_todo":
+                    name = data.get("name") or text
+                    target = find_notion_todo_fuzzy(name)
+                    if target:
+                        pid = target["id"]
+                        inc_file = "C:/Users/ST/.gemini/antigravity-ide/brain/f9de8527-920e-4eaf-ae2b-5a4061a0a8a6/incomplete_reported.json"
+                        import os, json
+                        reported_list = []
+                        if os.path.exists(inc_file):
+                            try:
+                                with open(inc_file, "r", encoding="utf-8") as f:
+                                    reported_list = json.load(f)
+                            except:
+                                pass
+                        
+                        if pid not in reported_list:
+                            reported_list.append(pid)
+                            with open(inc_file, "w", encoding="utf-8") as f:
+                                json.dump(reported_list, f, ensure_ascii=False, indent=2)
+                        
+                        update_page(pid, {"已完成頁數/題數": {"number": 0}})
+                        send_telegram_message(f"已記錄待辦【{get_title(target, '名稱')}】為未完成，將為您重新排入之後的行程！")
+                    else:
+                        send_telegram_message(f"找不到符合「{name}」的待辦事項。")
                         
                 elif action == "add_activity":
                     name = data.get("name") or "未命名活動"
@@ -862,23 +943,10 @@ def process_telegram_commands(today_dt):
                     name = cmd_data["name"]
                     actual_time = cmd_data["actual_time"]
                     
-                    todo_query = {
-                        "filter": {
-                            "and": [
-                                {"property": "名稱", "title": {"contains": name}}
-                            ]
-                        }
-                    }
-                    candidates = query_database_all(TODO_ACTIVITIES_DB_ID, todo_query)
-                    target_row = None
-                    for row in candidates:
-                        if not is_task_completed(row):
-                            target_row = row
-                            break
-                            
+                    target_row = find_notion_todo_fuzzy(name)
                     if target_row:
                         total_pages = get_number(target_row, "總頁數/題數") or 1
-                        time_spent = 45
+                        time_spent = 30
                         if actual_time.isdigit():
                             time_spent = int(actual_time)
                             
@@ -889,7 +957,7 @@ def process_telegram_commands(today_dt):
                         update_page(target_row["id"], update_properties)
                         send_telegram_message(f"已將待辦【{get_title(target_row, '名稱')}】標記為完成，耗時 {time_spent} 分鐘。")
                     else:
-                        send_telegram_message(f"找不到名稱包含【{name}】且未完成的待辦事項。")
+                        send_telegram_message(f"找不到符合「{name}」的未完成待辦事項。")
 
             elif cmd_type == "act":
                 cmd_data = parse_act_command(text, today_str)
@@ -1230,7 +1298,11 @@ def analyze_activity_brochure_bytes(content, user_instruction=""):
        - name (要標記完成的事項關鍵字/名稱)
        - actual_time (實際耗時，必須是整數數字字串，表示分鐘，例如 "60"。若未提及則填 "#")
        
-    3. action: "add_activity" (新增一次性活動、比賽、講座、營隊、志工、出遊行程等)
+    3. action: "incomplete_todo" (標記某個待辦事項/功課為「沒寫完」、「未完成」，需要重新安排排程)
+       提取 data 欄位：
+       - name (沒寫完的作業關鍵字/名稱)
+       
+    4. action: "add_activity" (新增一次性活動、比賽、講座、營隊、志工、出遊行程等)
        提取 data 欄位：
        - name (活動名稱)
        - date (活動日期，如果是單日請填 YYYY-MM-DD。如果是多日區間，格式為 YYYY-MM-DD/YYYY-MM-DD，例如 "2026-07-15/2026-07-19")
@@ -1398,6 +1470,39 @@ def analyze_calendar_text(text_content, today_str):
     response = safe_generate_content(model, prompt, generation_config={"response_mime_type": "application/json"})
     return safe_load_json(response.text)
 
+def find_notion_todo_fuzzy(user_input):
+    results = query_database_all(TODO_ACTIVITIES_DB_ID)
+    uncompleted = [r for r in results if not is_task_completed(r) and get_title(r, "名稱")]
+    if not uncompleted:
+        return None
+        
+    options = []
+    for idx, t in enumerate(uncompleted):
+        options.append(f"{idx+1}. ID: {t['id']} | 名稱: {get_title(t, '名稱')} | 科目: {get_rich_text(t, '相關科目')}")
+        
+    options_text = "\n".join(options)
+    
+    prompt = f"""
+    請幫我比對使用者的輸入「{user_input}」，在下方的 Notion 任務清單中找到最匹配的那項任務。
+    基準規則：使用者可能沒有打完整名稱（例如使用者說「化學單元1」，在清單中可能對應「化學平衡：單元1」）。
+    
+    Notion 未完成任務清單：
+    {options_text}
+    
+    請僅返回匹配任務的 ID（例如 "abc-123-xyz"）。若沒有任何任務能夠匹配（例如無關的描述），請返回 "#"。
+    請只返回 ID 字串，絕對不要包含 markdown 標籤（如 ```）或任何其他說明文字。
+    """
+    try:
+        model = genai.GenerativeModel('gemini-3.1-flash-lite')
+        response = safe_generate_content(model, prompt)
+        res_id = response.text.strip().replace('"', '').replace("'", "")
+        for t in uncompleted:
+            if t["id"] == res_id:
+                return t
+    except Exception as ex:
+        print(f"Fuzzy matching Notion todo failed: {ex}")
+    return None
+
 def route_and_parse_natural_text(text_content, today_str):
     prompt = f"""
     請幫我分析以下使用者的日常文字訊息，並自動判定他們想要執行的動作。基準日期為：{today_str}。
@@ -1416,7 +1521,11 @@ def route_and_parse_natural_text(text_content, today_str):
        - name (要標記完成的事項關鍵字/名稱)
        - actual_time (實際耗時，必須是整數數字字串，表示分鐘，例如 "60"。若未提及則填 "#")
        
-    3. action: "add_activity" (新增一次性活動、比賽、講座、營隊、志工、出遊行程等)
+    3. action: "incomplete_todo" (標記某個待辦事項/功課為「沒寫完」、「未完成」，需要重新安排排程)
+       提取 data 欄位：
+       - name (沒寫完的作業關鍵字/名稱)
+       
+    4. action: "add_activity" (新增一次性活動、比賽、講座、營隊、志工、出遊行程等)
        提取 data 欄位：
        - name (活動名稱)
        - date (活動日期，格式為 YYYY-MM-DD)
@@ -1630,19 +1739,24 @@ def run_mode_a(today_dt):
             location_tracker[name] = (loc, r["id"])
 
     # 計算今天放學要帶回的物品 (狀態在家裡 -> 忽略；狀態在學校 -> 要帶回)
-    take_home = [] # list of tuples: (item, label)
+    take_home = [] # list of tuples: (item, label, page_id)
     for item, label in future_study_subjects.items():
         if item in location_tracker:
             loc, page_id = location_tracker[item]
             if loc == "在學校":
-                take_home.append((item, label))
+                take_home.append((item, label, page_id))
         else:
             # 追蹤庫中沒有的物品，預設新增且預設在學校 (以便之後提示需要帶回)
-            take_home.append((item, label))
-            create_page(BOOK_TRACKER_DB_ID, {
-                "科目/物品名稱": {"title": [{"text": {"content": item}}]},
-                "目前位置": {"select": {"name": "在學校"}}
-            })
+            try:
+                new_pg = create_page(BOOK_TRACKER_DB_ID, {
+                    "科目/物品名稱": {"title": [{"text": {"content": item}}]},
+                    "目前位置": {"select": {"name": "在學校"}}
+                })
+                page_id = new_pg.get("id")
+                if page_id:
+                    take_home.append((item, label, page_id))
+            except Exception as e:
+                print(f"新增書籍追蹤頁面失敗 {item}: {e}")
 
     take_home.sort(key=lambda x: x[0])
 
@@ -1660,8 +1774,14 @@ def run_mode_a(today_dt):
     # 組裝 Telegram 訊息
     if take_home:
         take_home_section = "\n".join([f"  [ ] {x[0]} ({x[1]})" for x in take_home])
+        inline_buttons = []
+        for x in take_home:
+            short_id = x[2].replace("-", "")
+            inline_buttons.append([{"text": f"✅ 已將 {x[0]} 帶回家", "callback_data": f"bh:{short_id}"}])
+        reply_markup = {"inline_keyboard": inline_buttons}
     else:
-        take_home_section = "  今天放學無須帶任何書本回家。"
+        take_home_section = "  今天放學無須帶 any 書本回家。"
+        reply_markup = None
 
     if total_spend > 0:
         expense_section = f"- 總計花費：{total_spend} 元"
@@ -1678,7 +1798,7 @@ def run_mode_a(today_dt):
 
 [今日消費統計]
 {expense_section}"""
-    send_telegram_message(telegram_msg)
+    send_telegram_message(telegram_msg, reply_markup=reply_markup)
 
 # ==================== 核心邏輯 B：半夜 12:00 執行 ====================
 
@@ -1709,11 +1829,8 @@ def run_mode_b(today_dt):
         t_type = get_select(t, "類型") or "作業"
         sub = get_rich_text(t, "相關科目")
         
-        default_time = DEFAULT_DURATION.get(t_type, 45)
-        if completed < 100 or actual_time > default_time:
-            if sub and sub.lower() != "無":
-                weighted_subjects.add(sub)
-                print(f"昨日任務 [{get_title(t, '名稱')}] 未完成或超時，今日科目 [{sub}] 任務預估時間將乘以 1.3 倍。")
+        # 動態回饋修正機制已應要求停用
+        pass
 
     # 2. 判斷寒暑假作息
     is_vac = is_vacation(today_dt)
@@ -2434,13 +2551,19 @@ def run_mode_b(today_dt):
             if item in location_tracker:
                 loc, page_id = location_tracker[item]
                 if loc == "在家裡":
-                    bring_to_school.append((item, label))
+                    bring_to_school.append((item, label, page_id))
             else:
-                bring_to_school.append((item, label))
-                create_page(BOOK_TRACKER_DB_ID, {
-                    "科目/物品名稱": {"title": [{"text": {"content": item}}]},
-                    "目前位置": {"select": {"name": "在家裡"}}
-                })
+                try:
+                    new_pg = create_page(BOOK_TRACKER_DB_ID, {
+                        "科目/物品名稱": {"title": [{"text": {"content": item}}]},
+                        "Currently_At": {"select": {"name": "在家裡"}},
+                        "目前位置": {"select": {"name": "在家裡"}}
+                    })
+                    page_id = new_pg.get("id")
+                    if page_id:
+                        bring_to_school.append((item, label, page_id))
+                except Exception as e:
+                    print(f"建立書籍追蹤頁面失敗 {item}: {e}")
         bring_to_school.sort(key=lambda x: x[0])
     except Exception as e:
         print(f"計算出門攜帶物品失敗: {e}")
@@ -2522,11 +2645,44 @@ def run_mode_b(today_dt):
                 }}
                 """
                 
+                schema = {
+                    "type": "object",
+                    "properties": {
+                        "daily_summary": {"type": "string"},
+                        "memos": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "actions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "action": {"type": "string", "enum": ["add_expense", "add_todo", "add_activity"]},
+                                    "data": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "amount": {"type": "integer"},
+                                            "category": {"type": "string"},
+                                            "subject": {"type": "string"},
+                                            "due_date": {"type": "string"},
+                                            "type": {"type": "string"},
+                                            "date": {"type": "string"}
+                                        }
+                                    }
+                                },
+                                "required": ["action", "data"]
+                            }
+                        }
+                    },
+                    "required": ["daily_summary", "memos", "actions"]
+                }
                 model = genai.GenerativeModel('gemini-3.1-flash-lite')
                 if pil_images:
-                    response = safe_generate_content(model, [prompt] + pil_images, generation_config={"response_mime_type": "application/json"})
+                    response = safe_generate_content(model, [prompt] + pil_images, generation_config={"response_mime_type": "application/json", "response_schema": schema})
                 else:
-                    response = safe_generate_content(model, prompt, generation_config={"response_mime_type": "application/json"})
+                    response = safe_generate_content(model, prompt, generation_config={"response_mime_type": "application/json", "response_schema": schema})
                     
                 res_json = safe_load_json(response.text)
                 daily_summary_text = res_json.get("daily_summary", "")
@@ -2600,7 +2756,17 @@ def run_mode_b(today_dt):
     if memos_section:
         telegram_msg += memos_section
 
-    send_telegram_message(telegram_msg)
+    reply_markup = None
+    if bring_to_school:
+        inline_buttons = []
+        for x in bring_to_school:
+            if len(x) >= 3:
+                short_id = x[2].replace("-", "")
+                inline_buttons.append([{"text": f"✅ 已將 {x[0]} 帶去學校", "callback_data": f"bs:{short_id}"}])
+        if inline_buttons:
+            reply_markup = {"inline_keyboard": inline_buttons}
+
+    send_telegram_message(telegram_msg, reply_markup=reply_markup)
 
 def run_mode_shortcut(today_dt):
     print("【隨手記 SHORTCUT 模式】將輸入寫入 Notion 暫存區")

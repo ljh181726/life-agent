@@ -60,7 +60,7 @@ act_cal   = os.environ.get("GOOGLE_CALENDAR_ID_ACTIVITY") or os.environ.get("GOO
 all_cals  = list(dict.fromkeys([class_cal, task_cal, act_cal]))
 
 SOURCE_TAG = "life-agent-free-slot"
-PLAN_DAYS  = 30
+PLAN_DAYS  = 40
 TZ         = "Asia/Taipei"
 
 # 課堂內可用的最後N分鐘（非中堂休息，非留校）
@@ -107,9 +107,25 @@ for ev in raw_events:
             "summary": ev.get("summary", ""),
             "start": s_min, "end": e_min
         })
+    elif s.get("date"):
+        # 全天行程 (All-day event)
+        try:
+            start_date = datetime.strptime(s["date"], "%Y-%m-%d").date()
+            end_date = datetime.strptime(e["date"], "%Y-%m-%d").date()
+            curr = start_date
+            while curr < end_date:
+                curr_str = curr.strftime("%Y-%m-%d")
+                day_events[curr_str].append({
+                    "summary": ev.get("summary", ""),
+                    "start": 0, "end": 1440
+                })
+                curr += timedelta(days=1)
+        except Exception as ex:
+            print(f"解析全天行程失敗: {ex}")
+
 for d in day_events:
     day_events[d].sort(key=lambda x: x["start"])
-print(f"讀取到 {sum(len(v) for v in day_events.values())} 筆行程。")
+print(f"讀取到 {sum(len(v) for v in day_events.values())} 筆行程（含全天阻斷）。")
 
 # ── 清除舊空檔 ───────────────────────────────────────────────────
 print("清除舊的空檔標記...")
@@ -162,6 +178,11 @@ for day_offset in range(PLAN_DAYS):
     wd    = d.weekday()
     is_wkd = wd >= 5
     evs   = day_events.get(d_str, [])
+
+    # ── 8/10-8/12 參訪行程，完全封鎖不排空檔 ──
+    if "2026-08-10" <= d_str <= "2026-08-12":
+        print(f"  {d_str} ({weekday_zh[wd]}) 參訪行程，封鎖整天。")
+        continue
 
     # 找出暑輔科目
     school_evs = sorted([ev for ev in evs if "暑輔" in ev["summary"]], key=lambda x: x["start"])

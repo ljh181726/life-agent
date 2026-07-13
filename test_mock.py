@@ -258,9 +258,11 @@ def mock_analyze_todo_photo(image_url, today_str):
         "subject": "數學"
     }
 
-def mock_send_telegram_message(message):
+def mock_send_telegram_message(message, reply_markup=None):
     print("\n========== 模擬 TELEGRAM 訊息發送 ==========")
     print(message)
+    if reply_markup:
+        print(f"[Inline Keyboard]: {reply_markup}")
     print("============================================\n")
 
 # ==================== MOCKING Google Calendar API ====================

@@ -13,7 +13,7 @@ import sys
 import json
 import time
 import requests
-import json
+import re
 
 def auto_complete_past_tasks():
     print("正在檢查過去排程是否已完成 (沒說就是有完成)...")
@@ -208,6 +208,134 @@ def create_notion_todo(name, subject, due_date):
         print(f"  [Notion] 建立補習作業失敗 {name}: {r.status_code} - {r.text}")
         return False
 
+def get_or_create_tasks_list(access_token, list_name):
+    url = "https://tasks.googleapis.com/v1/users/@me/lists"
+    h = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    try:
+        r = requests.get(url, headers=h)
+        if r.status_code == 200:
+            lists = r.json().get("items", [])
+            for lst in lists:
+                if lst.get("title") == list_name:
+                    return lst.get("id")
+        r_create = requests.post(url, headers=h, json={"title": list_name})
+        if r_create.status_code == 200:
+            print(f"成功建立 Google Tasks 清單: {list_name}")
+            return r_create.json().get("id")
+    except Exception as e:
+        print(f"查詢/建立 Tasks 清單失敗: {e}")
+    return "@default"
+
+def check_google_tasks_completion(access_token, list_id):
+    print("正在檢查 Google Tasks 完成狀態並同步回 Notion...")
+    url = f"https://tasks.googleapis.com/v1/lists/{list_id}/tasks"
+    h = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    params = {
+        "showCompleted": "true",
+        "showHidden": "true",
+        "maxResults": 100
+    }
+    completed_notion_ids = []
+    try:
+        r = requests.get(url, headers=h, params=params)
+        if r.status_code == 200:
+            tasks = r.json().get("items", [])
+            for t in tasks:
+                notes = t.get("notes", "")
+                if "NotionID: [" in notes:
+                    match = re.search(r"NotionID:\s*\[([a-f0-9\-]+)\]", notes)
+                    if match:
+                        pid = match.group(1)
+                        if t.get("status") == "completed":
+                            completed_notion_ids.append(pid)
+    except Exception as e:
+        print(f"從 Google Tasks 取得完成項目失敗: {e}")
+        return
+        
+    synced_count = 0
+    for pid in completed_notion_ids:
+        try:
+            res = requests.get(f"https://api.notion.com/v1/pages/{pid}", headers=notion_h)
+            if res.status_code == 200:
+                page = res.json()
+                done_pg  = get_number(page, "已完成頁數/題數")
+                total_pg = get_number(page, "總頁數/題數") or 1
+                if done_pg is None or done_pg < total_pg:
+                    payload = {"properties": {"已完成頁數/題數": {"number": total_pg}}}
+                    res_patch = requests.patch(f"https://api.notion.com/v1/pages/{pid}", headers=notion_h, json=payload)
+                    if res_patch.status_code == 200:
+                        print(f"  [Tasks 同步] {get_text(page, '名稱')} 已由 Tasks App 標記完成")
+                        synced_count += 1
+        except Exception as ex:
+            print(f"同步 Notion 待辦完成失敗 {pid}: {ex}")
+    print(f"完成 Google Tasks 同步回 Notion，共更新 {synced_count} 筆。")
+
+def sync_todos_to_google_tasks(access_token, list_id, active_todos):
+    print("正在同步未完成的 Notion 待辦至 Google Tasks...")
+    url = f"https://tasks.googleapis.com/v1/lists/{list_id}/tasks"
+    h = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    existing_tasks = {}
+    try:
+        r = requests.get(url, headers=h, params={"showCompleted": "true", "showHidden": "true", "maxResults": 100})
+        if r.status_code == 200:
+            for t in r.json().get("items", []):
+                notes = t.get("notes", "")
+                if "NotionID: [" in notes:
+                    match = re.search(r"NotionID:\s*\[([a-f0-9\-]+)\]", notes)
+                    if match:
+                        pid = match.group(1)
+                        existing_tasks[pid] = (t.get("id"), t.get("status"))
+    except Exception as e:
+        print(f"取得現有 Tasks 失敗: {e}")
+        return
+
+    active_pids = set()
+    for t in active_todos:
+        pid = t["notion_page_id"]
+        active_pids.add(pid)
+        name = t["name"]
+        due_str = t["due"]
+        notes_content = f"NotionID: [{pid}]\n相關科目: {t['subject']}\n類型: {t['type']}"
+        due_rfc = None
+        if due_str and due_str != "無截止日":
+            due_rfc = f"{due_str}T00:00:00.000Z"
+        task_payload = {
+            "title": name,
+            "notes": notes_content,
+        }
+        if due_rfc:
+            task_payload["due"] = due_rfc
+            
+        if pid in existing_tasks:
+            gtid, status = existing_tasks[pid]
+            try:
+                requests.patch(f"{url}/{gtid}", headers=h, json=task_payload)
+            except Exception as e:
+                print(f"更新 Google Task 失敗 {gtid}: {e}")
+        else:
+            try:
+                requests.post(url, headers=h, json=task_payload)
+                print(f"  [Google Tasks] 已建立任務: {name}")
+            except Exception as e:
+                print(f"建立 Google Task 失敗 {name}: {e}")
+
+    for pid, (gtid, status) in existing_tasks.items():
+        if pid not in active_pids and status == "needsAction":
+            try:
+                res = requests.get(f"https://api.notion.com/v1/pages/{pid}", headers=notion_h)
+                if res.status_code == 200:
+                    page = res.json()
+                    done_pg  = get_number(page, "已完成頁數/題數")
+                    total_pg = get_number(page, "總頁數/題數") or 1
+                    if done_pg is not None and done_pg >= total_pg:
+                        requests.patch(f"{url}/{gtid}", headers=h, json={"status": "completed"})
+                        print(f"  [Google Tasks] 標記已完成: {get_text(page, '名稱')}")
+                elif res.status_code == 404:
+                    requests.delete(f"{url}/{gtid}", headers=h)
+                    print(f"  [Google Tasks] 已刪除孤兒任務: {gtid}")
+            except Exception as e:
+                print(f"處理孤兒任務失敗 {pid}: {e}")
+
 def auto_generate_cram_homeworks(existing_todos, target_date, days_range):
     print(f"正在檢查未來 {days_range} 天是否有補習班課程，以自動生成作業...")
     time_min = target_date.isoformat() + "T00:00:00+08:00"
@@ -297,6 +425,10 @@ def fetch_all_notion_todos():
         cursor   = d.get("next_cursor")
     return results
 
+tasks_list_name = os.environ.get("GOOGLE_TASKS_LIST_NAME") or "Life-Agent"
+tasks_list_id = get_or_create_tasks_list(gcal_token, tasks_list_name)
+check_google_tasks_completion(gcal_token, tasks_list_id)
+
 auto_complete_past_tasks()
 
 notion_todos = fetch_all_notion_todos()
@@ -378,48 +510,10 @@ def subtract_intervals(free_slots_list, busy_slots_list):
 
 print(f"共找到 {len(todos)} 筆未完成排程作業，{len(misc_todos)} 筆未完成雜項待辦。")
 
-# ── 2. Check and clean GCal events ──
-real_today = datetime.now().date()
-window_end_date = today + timedelta(days=PLAN_DAYS)
-time_min_query = datetime.combine(real_today - timedelta(days=1), datetime.min.time()).isoformat() + "+08:00"
-time_max_query = datetime.combine(window_end_date, datetime.max.time()).isoformat() + "+08:00"
-params = {"timeMin": time_min_query, "timeMax": time_max_query, "singleEvents": "true", "maxResults": 500}
-
-print("正在檢查與清理 Google Calendar 排程...")
-already_scheduled_ids = set()
-busy_slots = []
-cleared = 0
-
-r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events", headers=gcal_h, params=params)
-if r.status_code == 200:
-    for ev in r.json().get("items", []):
-        if ev.get("extendedProperties", {}).get("private", {}).get("source") == SOURCE_TAG:
-            start_str = ev.get("start", {}).get("dateTime", "") or ev.get("start", {}).get("date", "")
-            if not start_str:
-                continue
-            ev_date = datetime.strptime(start_str[:10], "%Y-%m-%d").date()
-            
-            # 8/10-8/12 參訪期間的行程，以及過去的舊排程，一律清除重排
-            is_trip_day = "2026-08-10" <= start_str[:10] <= "2026-08-12"
-            if ev_date < real_today or is_trip_day:
-                dr = requests.delete(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events/{ev['id']}", headers=gcal_h)
-                if dr.status_code in [200, 204]:
-                    cleared += 1
-            else:
-                # 未來 (7/13+) 已安排好的行程：保留它
-                pid = ev.get("extendedProperties", {}).get("private", {}).get("notion_page_id")
-                if pid:
-                    already_scheduled_ids.add(pid)
-                start_dt = parse_iso(ev["start"]["dateTime"])
-                end_dt = parse_iso(ev["end"]["dateTime"])
-                busy_slots.append((start_dt, end_dt))
-
-print(f"已清除 {cleared} 筆過期/參訪的舊 AI 排程，保留 {len(busy_slots)} 筆未來已安排的 AI 排程。")
-
-# ── 3. Query free slots (next PLAN_DAYS) ──
+# ── 2. Query free slots (next PLAN_DAYS) ──
 print(f"正在讀取未來 {PLAN_DAYS} 天自習日曆的「可用空檔」...")
 time_min = datetime.combine(today, datetime.min.time()).isoformat() + "+08:00"
-time_max = datetime.combine(window_end_date, datetime.max.time()).isoformat() + "+08:00"
+time_max = (datetime.combine(today, datetime.min.time()) + timedelta(days=PLAN_DAYS+1)).isoformat() + "+08:00"
 
 params_slots = {"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "maxResults": 250, "orderBy": "startTime"}
 r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{study_cal}/events", headers=gcal_h, params=params_slots)
@@ -434,12 +528,124 @@ if r.status_code == 200:
             })
 print(f"讀取到 {len(free_slots)} 個原始可用空檔。")
 
-# 扣除未來已排程時間
+# ── 3. Check and clean GCal events with Conflict Detection & Locking ──
+real_today = datetime.now().date()
+time_min_query = datetime.combine(real_today - timedelta(days=1), datetime.min.time()).isoformat() + "+08:00"
+time_max_query = datetime.combine(today + timedelta(days=PLAN_DAYS), datetime.max.time()).isoformat() + "+08:00"
+params_events = {"timeMin": time_min_query, "timeMax": time_max_query, "singleEvents": "true", "maxResults": 500}
+
+print("正在檢查與清理 Google Calendar 排程 (增量鎖定與衝突檢測)...")
+already_scheduled_ids = set()
+busy_slots = []
+cleared = 0
+locked = 0
+
+uncompleted_pids = {t["id"] for t in notion_todos}
+todo_due_map = {t["id"]: get_date(t, "截止或考試日期") for t in notion_todos}
+
+def is_inside_free_slots(start_dt, end_dt, free_slots):
+    for fs in free_slots:
+        fs_start = parse_iso(fs["start"])
+        fs_end = parse_iso(fs["end"])
+        if fs_start <= start_dt and end_dt <= fs_end:
+            return True
+    return False
+
+r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events", headers=gcal_h, params=params_events)
+if r.status_code == 200:
+    ai_events = []
+    for ev in r.json().get("items", []):
+        if ev.get("extendedProperties", {}).get("private", {}).get("source") == SOURCE_TAG:
+            start_str = ev.get("start", {}).get("dateTime", "") or ev.get("start", {}).get("date", "")
+            if start_str:
+                ai_events.append(ev)
+    
+    ai_events.sort(key=lambda ev: ev.get("start", {}).get("dateTime", "") or ev.get("start", {}).get("date", ""))
+    
+    last_end_time = None
+    for ev in ai_events:
+        start_str = ev.get("start", {}).get("dateTime", "")
+        end_str = ev.get("end", {}).get("dateTime", "")
+        ev_date = datetime.strptime(start_str[:10], "%Y-%m-%d").date()
+        pid = ev.get("extendedProperties", {}).get("private", {}).get("notion_page_id")
+        
+        is_trip_day = "2026-08-10" <= start_str[:10] <= "2026-08-12"
+        is_past = ev_date < real_today
+        
+        conflict = False
+        reason = ""
+        
+        if is_past or is_trip_day:
+            conflict = True
+            reason = "過期或參訪日"
+        elif not pid or pid not in uncompleted_pids:
+            conflict = True
+            reason = "Notion 任務已完成或已刪除"
+        else:
+            start_dt = parse_iso(start_str)
+            end_dt = parse_iso(end_str)
+            
+            if not is_inside_free_slots(start_dt, end_dt, free_slots):
+                conflict = True
+                reason = "不在可用自習空檔內 (可能已被手動修改或空檔變更)"
+            else:
+                due_str = todo_due_map.get(pid)
+                if due_str and due_str != "無截止日":
+                    try:
+                        due_dt = datetime.strptime(due_str, "%Y-%m-%d")
+                        if start_dt.date() > due_dt.date():
+                            conflict = True
+                            reason = "截止日期已提前至排程時間之前"
+                    except:
+                        pass
+                
+                if not conflict and last_end_time and start_dt < last_end_time:
+                    conflict = True
+                    reason = "與其他鎖定行程時間重疊"
+                    
+        if conflict:
+            dr = requests.delete(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events/{ev['id']}", headers=gcal_h)
+            if dr.status_code in [200, 204]:
+                cleared += 1
+                print(f"  [刪除衝突] {ev.get('summary')} ({reason})")
+        else:
+            already_scheduled_ids.add(pid)
+            start_dt = parse_iso(start_str)
+            end_dt = parse_iso(end_str)
+            busy_slots.append((start_dt, end_dt))
+            last_end_time = end_dt
+            locked += 1
+            print(f"  [鎖定行程] {ev.get('summary')} ({start_str[11:16]}~{end_str[11:16]})")
+            
+            try:
+                res_notion = requests.get(f"https://api.notion.com/v1/pages/{pid}", headers=notion_h)
+                if res_notion.status_code == 200:
+                    page_data = res_notion.json()
+                    notion_date_prop = page_data.get("properties", {}).get("日期時間", {}).get("date")
+                    notion_start = notion_date_prop.get("start") if notion_date_prop else None
+                    if notion_start != start_str:
+                        payload = {
+                            "properties": {
+                                "日期時間": {
+                                    "date": {
+                                        "start": start_str,
+                                        "end": end_str
+                                    }
+                                }
+                            }
+                        }
+                        requests.patch(f"https://api.notion.com/v1/pages/{pid}", headers=notion_h, json=payload)
+                        print(f"  [Notion 更新時間] {ev.get('summary')} -> {start_str}")
+            except Exception as ex:
+                print(f"更新 Notion 日期時間失敗: {ex}")
+
+print(f"已清除 {cleared} 筆衝突/過期排程，鎖定保留 {locked} 筆未來排程。")
+
+# 扣除未來已鎖定排程時間
 free_slots = subtract_intervals(free_slots, busy_slots)
-print(f"扣除未來已排程時間後，剩餘 {len(free_slots)} 個可用空檔。")
+print(f"扣除鎖定排程時間後，剩餘 {len(free_slots)} 個可用空檔。")
 
 # ── 4. Filter todos ──
-window_end_date = today + timedelta(days=PLAN_DAYS)
 filtered_todos = []
 for t in todos:
     if t["notion_page_id"] in already_scheduled_ids:
@@ -456,50 +662,7 @@ for t in todos:
             if OFFSET_DAYS == 0:
                 filtered_todos.append(t)
 
-# 為了實現「真的不行才動原本的」：
-# 如果 (filtered_todos 且 free_slots 的總長度小於 filtered_todos 的總預估時間)，
-# 我們就「退回」：把所有未來已安排的 AI 排程全部清除，讓 Gemini 重新安排整個區間的所有工作！
-total_todo_hours = sum(t["est_hr"] for t in filtered_todos)
-total_free_hours = sum((parse_iso(fs["end"]) - parse_iso(fs["start"])).seconds / 3600 for fs in free_slots)
-
-if filtered_todos and (total_free_hours < total_todo_hours or not free_slots):
-    print("⚠️ 剩餘空檔不足以排入新作業！啟動退回機制：清除本區間所有已排程，重新分配...")
-    # 清除本區間 (today 到 window_end_date) 的所有已排程
-    time_min_win = datetime.combine(today, datetime.min.time()).isoformat() + "+08:00"
-    params_win = {"timeMin": time_min_win, "timeMax": time_max, "singleEvents": "true", "maxResults": 500}
-    r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events", headers=gcal_h, params=params_win)
-    if r.status_code == 200:
-        for ev in r.json().get("items", []):
-            if ev.get("extendedProperties", {}).get("private", {}).get("source") == SOURCE_TAG:
-                requests.delete(f"https://www.googleapis.com/calendar/v3/calendars/{task_cal}/events/{ev['id']}", headers=gcal_h)
-    
-    # 重新讀取原始空檔（不扣除 busy_slots）
-    r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{study_cal}/events", headers=gcal_h, params=params_slots)
-    free_slots = []
-    if r.status_code == 200:
-        for item in r.json().get("items", []):
-            if item.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent-free-slot":
-                free_slots.append({
-                    "summary": item.get("summary", ""),
-                    "start": item["start"]["dateTime"],
-                    "end": item["end"]["dateTime"]
-                })
-    
-    # 重新把原本被排除的 todo 加入排程清單
-    filtered_todos = []
-    for t in todos:
-        if t["due"] == "無截止日" or not t["due"]:
-            if OFFSET_DAYS == 0:
-                filtered_todos.append(t)
-        else:
-            try:
-                due_dt = datetime.strptime(t["due"], "%Y-%m-%d").date()
-                if today <= due_dt <= window_end_date:
-                    filtered_todos.append(t)
-            except Exception:
-                if OFFSET_DAYS == 0:
-                    filtered_todos.append(t)
-    print(f"退回後：可用空檔數={len(free_slots)}，待排程作業數={len(filtered_todos)}")
+print(f"可用空檔數={len(free_slots)}，新待排程作業數={len(filtered_todos)}")
 
 if not filtered_todos and not misc_todos:
     print(f"在 {today.strftime('%m/%d')} 至 {window_end_date.strftime('%m/%d')} 區間內無待排程的作業或雜項。")
@@ -575,7 +738,33 @@ if filtered_todos:
     gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     gemini_payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 16384, "response_mime_type": "application/json"}
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 16384,
+            "response_mime_type": "application/json",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "schedule": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "notion_page_id": {"type": "string"},
+                                "name": {"type": "string"},
+                                "date": {"type": "string"},
+                                "start": {"type": "string"},
+                                "end": {"type": "string"},
+                                "subject": {"type": "string"},
+                                "type": {"type": "string"}
+                            },
+                            "required": ["notion_page_id", "name", "date", "start", "end", "subject", "type"]
+                        }
+                    }
+                },
+                "required": ["schedule"]
+            }
+        }
     }
     
     raw = None
@@ -717,3 +906,7 @@ if os.path.exists(inc_file):
         print(f"已清理沒寫完回報快取，剩餘 {len(new_reported)} 筆追蹤中。")
     except Exception as ex:
         print(f"清理回報快取失敗: {ex}")
+
+# ── 8. Sync active todos to Google Tasks ──
+all_active_todos = todos + misc_todos
+sync_todos_to_google_tasks(gcal_token, tasks_list_id, all_active_todos)
