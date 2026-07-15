@@ -166,15 +166,21 @@ def main():
         lines = f.readlines()
 
     new_lines = []
+    updated_keys = set()
     for line in lines:
         matched = False
         for env_key, db_id in created_ids.items():
             if line.startswith(f"{env_key}="):
                 new_lines.append(f"{env_key}={db_id}\n")
                 matched = True
+                updated_keys.add(env_key)
                 break
         if not matched:
             new_lines.append(line)
+
+    for env_key, db_id in created_ids.items():
+        if env_key not in updated_keys:
+            new_lines.append(f"{env_key}={db_id}\n")
 
     with open(env_path, "w", encoding="utf-8") as f:
         f.writelines(new_lines)

@@ -1096,7 +1096,7 @@ def process_telegram_commands(today_dt):
                                 if res_list and res_list.status_code == 200:
                                     for ev_gcal in res_list.json().get("items", []):
                                         is_bot = (
-                                            ev_gcal.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent" or
+                                            ev_gcal.get("extendedProperties", {}).get("private", {}).get("source") in ["life-agent", "life-agent-ai-scheduled"] or
                                             "[Life-Agent 自動生成]" in (ev_gcal.get("description") or "")
                                         )
                                         if is_bot:
@@ -1732,8 +1732,19 @@ def run_mode_a(today_dt):
             if res_class and res_class.status_code == 200:
                 for ev in res_class.json().get("items", []):
                     summary = ev.get("summary", "")
-                    if "PC" in summary:
-                        start_time_str = ev.get("start", {}).get("dateTime", "")
+                    start_time_str = ev.get("start", {}).get("dateTime", "")
+                    is_cram = False
+                    if start_time_str:
+                        try:
+                            hour = int(start_time_str.split("T", 1)[1][:2])
+                            if hour >= 17:
+                                is_cram = True
+                        except:
+                            pass
+                    summary_lower = summary.lower()
+                    if any(k in summary_lower for k in ["pc", "mec", "補習", "補"]):
+                        is_cram = True
+                    if is_cram:
                         end_time_str = ev.get("end", {}).get("dateTime", "")
                         start_formatted = start_time_str[11:16] if start_time_str else ""
                         end_formatted = end_time_str[11:16] if end_time_str else ""
@@ -1743,7 +1754,7 @@ def run_mode_a(today_dt):
             res_task = make_gcal_request("GET", url_task, params=params_gcal)
             if res_task and res_task.status_code == 200:
                 for ev in res_task.json().get("items", []):
-                    if ev.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent":
+                    if ev.get("extendedProperties", {}).get("private", {}).get("source") in ["life-agent", "life-agent-ai-scheduled"]:
                         summary = ev.get("summary", "")
                         start_time_str = ev.get("start", {}).get("dateTime", "")
                         end_time_str = ev.get("end", {}).get("dateTime", "")
@@ -1972,7 +1983,7 @@ def run_mode_b(today_dt):
             events_in_cal = res_list.json().get("items", [])
             for ev in events_in_cal:
                 is_bot = (
-                    ev.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent" or
+                    ev.get("extendedProperties", {}).get("private", {}).get("source") in ["life-agent", "life-agent-ai-scheduled"] or
                     "[Life-Agent 自動生成]" in (ev.get("description") or "")
                 )
                 if is_bot:
@@ -2578,15 +2589,26 @@ def run_mode_b(today_dt):
         if res_class_b and res_class_b.status_code == 200:
             for ev in res_class_b.json().get("items", []):
                 summary = ev.get("summary", "")
-                if "PC" in summary:
-                    start_time_str = ev.get("start", {}).get("dateTime", "")
+                start_time_str = ev.get("start", {}).get("dateTime", "")
+                is_cram = False
+                if start_time_str:
+                    try:
+                        hour = int(start_time_str.split("T", 1)[1][:2])
+                        if hour >= 17:
+                            is_cram = True
+                    except:
+                        pass
+                summary_lower = summary.lower()
+                if any(k in summary_lower for k in ["pc", "mec", "補習", "補"]):
+                    is_cram = True
+                if is_cram:
                     start_formatted = start_time_str[11:16] if start_time_str else ""
                     today_cram_list.append((summary, start_formatted))
                     
         res_task_b = make_gcal_request("GET", f"https://www.googleapis.com/calendar/v3/calendars/{task_calendar_id}/events", params=params_b)
         if res_task_b and res_task_b.status_code == 200:
             for ev in res_task_b.json().get("items", []):
-                if ev.get("extendedProperties", {}).get("private", {}).get("source") == "life-agent":
+                if ev.get("extendedProperties", {}).get("private", {}).get("source") in ["life-agent", "life-agent-ai-scheduled"]:
                     summary = ev.get("summary", "")
                     start_time_str = ev.get("start", {}).get("dateTime", "")
                     start_formatted = start_time_str[11:16] if start_time_str else ""
