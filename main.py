@@ -724,143 +724,148 @@ def process_telegram_commands(today_dt):
             # Generic entry handling: Call Gemini to route and parse the message!
             try:
                 res_route = route_and_parse_natural_text(text, today_str)
-                action = res_route.get("action")
-                data = res_route.get("data", {})
+                actions_list = res_route if isinstance(res_route, list) else [res_route]
                 
-                if action == "add_todo":
-                    name = data.get("name")
-                    subject = data.get("subject") or "無"
-                    due_date = data.get("due_date")
-                    t_type = data.get("type") or "作業"
+                for action_item in actions_list:
+                    if not isinstance(action_item, dict):
+                        continue
+                    action = action_item.get("action")
+                    data = action_item.get("data", {})
                     
-                    if not name or name == "#":
-                        name = "未命名待辦"
-                    if t_type not in ["作業", "小考", "段考", "回條", "報名表"]:
-                        t_type = "作業"
-                    
-                    properties = {
-                        "名稱": {"title": [{"text": {"content": name}}]},
-                        "類型": {"select": {"name": t_type}},
-                        "相關科目": {"rich_text": [{"text": {"content": subject}}]}
-                    }
-                    if due_date and is_valid_date_format(due_date):
-                        properties["截止或考試日期"] = {"date": {"start": due_date.strip()}}
+                    if action == "add_todo":
+                        name = data.get("name")
+                        subject = data.get("subject") or "無"
+                        due_date = data.get("due_date")
+                        t_type = data.get("type") or "作業"
                         
-                    create_page(TODO_ACTIVITIES_DB_ID, properties)
-                    due_msg = f"，截止日期：{due_date}" if (due_date and is_valid_date_format(due_date)) else ""
-                    send_telegram_message(f"已自動分析並新增待辦：{name} (科目: {subject}{due_msg})")
-                    
-                elif action == "complete_todo":
-                    name = data.get("name") or text
-                    target = find_notion_todo_fuzzy(name)
-                    if target:
-                        total_pages = get_number(target, "總頁數/題數") or 1
-                        time_spent = None
-                        if data.get("actual_time") and data.get("actual_time") != "#":
-                            try:
-                                time_spent = int(data.get("actual_time"))
-                            except:
-                                pass
-                        update_properties = {
-                            "已完成頁數/題數": {"number": total_pages}
-                        }
-                        if time_spent is not None:
-                            update_properties["實際耗時"] = {"number": time_spent}
-                        update_page(target["id"], update_properties)
-                        time_msg = f"，耗時 {time_spent} 分鐘" if time_spent is not None else ""
-                        send_telegram_message(f"已將待辦【{get_title(target, '名稱')}】標記為完成{time_msg}。")
-                    else:
-                        send_telegram_message(f"找不到符合「{name}」的未完成待辦事項。")
+                        if not name or name == "#":
+                            name = "未命名待辦"
+                        if t_type not in ["作業", "小考", "段考", "回條", "報名表"]:
+                            t_type = "作業"
                         
-                elif action == "incomplete_todo":
-                    name = data.get("name") or text
-                    target = find_notion_todo_fuzzy(name)
-                    if target:
-                        pid = target["id"]
-                        inc_file = "C:/Users/ST/.gemini/antigravity-ide/brain/f9de8527-920e-4eaf-ae2b-5a4061a0a8a6/incomplete_reported.json"
-                        import os, json
-                        reported_list = []
-                        if os.path.exists(inc_file):
-                            try:
-                                with open(inc_file, "r", encoding="utf-8") as f:
-                                    reported_list = json.load(f)
-                            except:
-                                pass
-                        
-                        if pid not in reported_list:
-                            reported_list.append(pid)
-                            with open(inc_file, "w", encoding="utf-8") as f:
-                                json.dump(reported_list, f, ensure_ascii=False, indent=2)
-                        
-                        update_page(pid, {"已完成頁數/題數": {"number": 0}})
-                        send_telegram_message(f"已記錄待辦【{get_title(target, '名稱')}】為未完成，將為您重新排入之後的行程！")
-                    else:
-                        send_telegram_message(f"找不到符合「{name}」的待辦事項。")
-                        
-                elif action == "add_activity":
-                    name = data.get("name") or "未命名活動"
-                    date_val = data.get("date") or today_str
-                    a_type = data.get("type") or "其他"
-                    
-                    start_date = date_val.strip()
-                    end_date = None
-                    if "/" in date_val:
-                        parts = date_val.split("/")
-                        start_date = parts[0].strip()
-                        end_date = parts[1].strip()
-                        
-                    if not is_valid_date_format(start_date):
-                        start_date = today_str
-                    if end_date and not is_valid_date_format(end_date):
-                        end_date = None
-                        
-                    date_prop = {"start": start_date}
-                    if end_date:
-                        date_prop["end"] = end_date
-                        
-                    properties = {
-                        "活動名稱": {"title": [{"text": {"content": name}}]},
-                        "日期": {"date": date_prop},
-                        "類型": {"select": {"name": a_type}}
-                    }
-                    create_page(ACTIVITIES_DB_ID, properties)
-                    write_activity_to_gcal(name, date_val, a_type)
-                    range_msg = f"{start_date} 至 {end_date}" if end_date else start_date
-                    send_telegram_message(f"已自動分析並新增活動：{name} (日期: {range_msg}, 類型: {a_type})，且已同步至 Google Calendar。")
-                    
-                elif action == "add_expense":
-                    name = data.get("name") or "未分類消費"
-                    amount = data.get("amount") or 0
-                    cat = data.get("category") or "飲食"
-                    
-                    try:
-                        amount = int(amount)
-                    except:
-                        amount = 0
-                    if cat not in ["飲食", "交通", "娛樂", "學習"]:
-                        cat = "飲食"
-                    
-                    properties = {
-                        "項目名稱": {"title": [{"text": {"content": name}}]},
-                        "金額": {"number": amount},
-                        "分類": {"select": {"name": cat}},
-                        "日期": {"date": {"start": today_str}}
-                    }
-                    create_page(LEDGER_DB_ID, properties)
-                    send_telegram_message(f"已自動記帳：{name}，金額：{amount} 元 (分類: {cat})")
-                    
-                else:
-                    # generic_todo or fallback (雜項備忘)
-                    name = data.get("name") or text
-                    if TEMP_INBOX_DB_ID:
                         properties = {
-                            "內容": {"title": [{"text": {"content": f"雜項:{name}"}}]},
+                            "名稱": {"title": [{"text": {"content": name}}]},
+                            "類型": {"select": {"name": t_type}},
+                            "相關科目": {"rich_text": [{"text": {"content": subject}}]}
+                        }
+                        if due_date and is_valid_date_format(due_date):
+                            properties["截止或考試日期"] = {"date": {"start": due_date.strip()}}
+                            
+                        create_page(TODO_ACTIVITIES_DB_ID, properties)
+                        due_msg = f"，截止日期：{due_date}" if (due_date and is_valid_date_format(due_date)) else ""
+                        send_telegram_message(f"已自動分析並新增待辦：{name} (科目: {subject}{due_msg})")
+                        
+                    elif action == "complete_todo":
+                        name = data.get("name") or text
+                        target = find_notion_todo_fuzzy(name)
+                        if target:
+                            total_pages = get_number(target, "總頁數/題數") or 1
+                            time_spent = None
+                            if data.get("actual_time") and data.get("actual_time") != "#":
+                                try:
+                                    time_spent = int(data.get("actual_time"))
+                                except:
+                                    pass
+                            update_properties = {
+                                "已完成頁數/題數": {"number": total_pages}
+                            }
+                            if time_spent is not None:
+                                update_properties["實際耗時"] = {"number": time_spent}
+                            update_page(target["id"], update_properties)
+                            time_msg = f"，耗時 {time_spent} 分鐘" if time_spent is not None else ""
+                            send_telegram_message(f"已將待辦【{get_title(target, '名稱')}】標記為完成{time_msg}。")
+                        else:
+                            send_telegram_message(f"找不到符合「{name}」的未完成待辦事項。")
+                            
+                    elif action == "incomplete_todo":
+                        name = data.get("name") or text
+                        target = find_notion_todo_fuzzy(name)
+                        if target:
+                            pid = target["id"]
+                            inc_file = "d:/antigravity/life-agent/incomplete_reported.json"
+                            import os, json
+                            reported_list = []
+                            if os.path.exists(inc_file):
+                                try:
+                                    with open(inc_file, "r", encoding="utf-8") as f:
+                                        reported_list = json.load(f)
+                                except:
+                                    pass
+                            
+                            if pid not in reported_list:
+                                reported_list.append(pid)
+                                with open(inc_file, "w", encoding="utf-8") as f:
+                                    json.dump(reported_list, f, ensure_ascii=False, indent=2)
+                            
+                            update_page(pid, {"已完成頁數/題數": {"number": 0}})
+                            send_telegram_message(f"已記錄待辦【{get_title(target, '名稱')}】為未完成，將為您重新排入之後的行程！")
+                        else:
+                            send_telegram_message(f"找不到符合「{name}」的待辦事項。")
+                            
+                    elif action == "add_activity":
+                        name = data.get("name") or "未命名活動"
+                        date_val = data.get("date") or today_str
+                        a_type = data.get("type") or "其他"
+                        
+                        start_date = date_val.strip()
+                        end_date = None
+                        if "/" in date_val:
+                            parts = date_val.split("/")
+                            start_date = parts[0].strip()
+                            end_date = parts[1].strip()
+                            
+                        if not is_valid_date_format(start_date):
+                            start_date = today_str
+                        if end_date and not is_valid_date_format(end_date):
+                            end_date = None
+                            
+                        date_prop = {"start": start_date}
+                        if end_date:
+                            date_prop["end"] = end_date
+                            
+                        properties = {
+                            "活動名稱": {"title": [{"text": {"content": name}}]},
+                            "日期": {"date": date_prop},
+                            "類型": {"select": {"name": a_type}}
+                        }
+                        create_page(ACTIVITIES_DB_ID, properties)
+                        write_activity_to_gcal(name, date_val, a_type)
+                        range_msg = f"{start_date} 至 {end_date}" if end_date else start_date
+                        send_telegram_message(f"已自動分析並新增活動：{name} (日期: {range_msg}, 類型: {a_type})，且已同步至 Google Calendar。")
+                        
+                    elif action == "add_expense":
+                        name = data.get("name") or "未分類消費"
+                        amount = data.get("amount") or 0
+                        cat = data.get("category") or "飲食"
+                        
+                        try:
+                            amount = int(amount)
+                        except:
+                            amount = 0
+                        if cat not in ["飲食", "交通", "娛樂", "學習"]:
+                            cat = "飲食"
+                        
+                        properties = {
+                            "項目名稱": {"title": [{"text": {"content": name}}]},
+                            "金額": {"number": amount},
+                            "分類": {"select": {"name": cat}},
                             "日期": {"date": {"start": today_str}}
                         }
-                        create_page(TEMP_INBOX_DB_ID, properties)
-                        send_telegram_message(f"已記下雜項提醒：{name}。將於深夜通知時提醒您！")
+                        create_page(LEDGER_DB_ID, properties)
+                        send_telegram_message(f"已自動記帳：{name}，金額：{amount} 元 (分類: {cat})")
+                        
                     else:
-                        send_telegram_message(f"暫存區未設定，無法記錄雜項：{name}")
+                        # generic_todo or fallback (雜項備忘)
+                        name = data.get("name") or text
+                        if TEMP_INBOX_DB_ID:
+                            properties = {
+                                "內容": {"title": [{"text": {"content": f"雜項:{name}"}}]},
+                                "日期": {"date": {"start": today_str}}
+                            }
+                            create_page(TEMP_INBOX_DB_ID, properties)
+                            send_telegram_message(f"已記下雜項提醒：{name}。將於深夜通知時提醒您！")
+                        else:
+                            send_telegram_message(f"暫存區未設定，無法記錄雜項：{name}")
                     
             except Exception as e:
                 print(f"自動路由分析失敗: {e}")
@@ -1546,6 +1551,11 @@ def route_and_parse_natural_text(text_content, today_str):
     1. 記帳與消費優先：凡是訊息涉及「花了多少錢」、「買了」、「費用」、「金額」、「元」、「收據」等與【金錢/消費/花費/購買/記帳】相關的任何敘述，必須路由為 "add_expense"，絕不能分配為作業 "add_todo" 或備忘 "generic_todo"。
     2. 活動與行程優先：凡是訊息涉及「營隊」、「比賽」、「志工」、「講座」、「聚會」、「演講」、「黑客松」等【一次性活動或日程】，必須路由為 "add_activity"，絕不能分配為學校作業待辦 "add_todo"。
     3. 功課與小考：僅限於學校的功課、作業、課後練習、複習、小考、段考、家長回條等【學校課業與課後自修待辦】路由為 "add_todo"。
+    4. 「未完成」與「沒寫完」：凡是訊息中提到「未完成」、「沒寫完」、「不合格」、「重新排程」等詞，代表某個工作需要再次排程，應路由為 "incomplete_todo"。
+
+    【日期與單元判定注意事項 (CRITICAL DATE & SECTION RULES)】：
+    1. 像 "11-3"、"2-4"、"B5L2" 這樣的英文或數字組合，通常是教科書的章節、單元、題號或頁碼（例如 "11-3反方陣" 代表第11章第3節的反方陣，"11-3列運算" 代表第11章第3節的列運算），千萬不要誤判為截止日期（不要誤判為 11月3日）。
+    2. 只有當訊息中明確寫出「月」、「日」、「截止」、「期限」，或包含「明天」、「今天」、「下週」等時間詞時，才提取 due_date。否則 due_date 必須填 "#"。
 
     待解析敘述：
     "{text_content}"
